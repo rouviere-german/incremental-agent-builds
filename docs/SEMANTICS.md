@@ -92,6 +92,15 @@ A trace covers every input the rule read **through its `BuildContext`**:
 | `config(dotted_key)` | config dependency, hash of that one value | that key's value changing — **not** other edits to the file |
 | `tool(name, args)` | tool step fingerprint → output hash | args, declared input files, or the tool's `version` changing |
 | `llm(template, vars, ...)` | LLM step fingerprint → output hash | the template text, model id, `max_tokens`, system prompt, output schema, redaction flag or any variable changing |
+| *any of the above, when the call **raises*** | a failed-call dependency with a sentinel hash | nothing: the sentinel is not a valid digest, so the key re-runs until the call succeeds |
+
+**A rule must not continue after a `BuildContext` call raises.** Let the exception propagate: the key
+fails, no trace is written, and the next build retries it. A rule that catches the error and returns a
+fallback is caching a value that is *not* a function of its inputs — the provider was down, the tool
+crashed, a needed key failed — so the engine records the failed call itself, with a hash no real value
+can equal. Verification mismatches on it, the planner reports the key dirty, and the degraded value can
+never be served a second time. The cost of ignoring the contract is therefore an extra execution on
+every build while the call keeps failing, not a stale artifact.
 
 It does **not** cover:
 
@@ -150,8 +159,18 @@ Importing one is safe only because both halves are checked:
   current values, exactly like a verifying trace, and re-checks the signature against the allowlist at
   that moment — so removing a key revokes its entries retroactively.
 
-Only traces a store computed itself (`origin == "executed"`) are exported, so trust cannot launder
-itself through a chain of stores.
+The same applies to the **step records** a bundle carries (the LLM outputs and tool results the
+exported traces relied on). They are foreign data too — a peer chose the model output this store would
+otherwise have paid for — so they are stored separately from locally computed steps, with the exact
+body that was signed, and every reuse re-verifies that signature against the current allowlist. A
+revoked signer's answers stop being served in both places, which is what
+`tests/unit/test_shared_cache.py::test_revoking_a_signer_stops_its_imported_steps_being_used` pins
+down.
+
+Only traces a store computed itself (`origin == "executed"`) are exported, and only step records it
+computed itself, so trust cannot launder itself through a chain of stores. A locally executed trace
+that used an imported step is exportable, but the step it names is not exported with it, so the
+importer re-runs that step instead of inheriting a signature it never checked.
 
 ## Scheduling
 
@@ -168,7 +187,7 @@ caught immediately. Keys not in the cycle still build.
 
 The check is exact reachability, so its cost grows with the number of simultaneously suspended keys.
 The cheap precondition — a target that waits for nothing cannot close a ring — removes the graph
-search in the common case, which is what took a 1,000-rule no-op rebuild from 437 ms p95 to 310 ms on
+search in the common case, which is what took a 1,000-rule no-op rebuild from 437 ms p95 to 283 ms on
 the machine in the README.
 
 **Failures** are per key: a rule that raises fails that key and everything that needs it, while
@@ -197,6 +216,11 @@ What the guard cannot see is documented in
 already-open handle, and anything a native extension does. **It is a guard against honest mistakes,
 not a sandbox.**
 
+The guard checks that every input came *through* the context. It says nothing about a rule that goes
+through the context and then ignores the outcome, which is the separate rule stated above: a rule must
+not continue after a `BuildContext` call raises. Hermeticity is enforced; that one is recorded (the
+failed call becomes a dependency that can never match) rather than prevented.
+
 ## Determinism assumptions, stated plainly
 
 | Assumption | Status |
@@ -204,6 +228,7 @@ not a sandbox.**
 | A rule is a pure function of what it read through `ctx` | Enforced in test mode by the audit hook, in CI by semgrep. Not enforced in production. |
 | Equal LLM requests produce equal outputs | Exact for `FakeProvider`. For a real model it is an assumption: the engine stores the first answer and reuses it, and never re-asks to check. Temperature is not settable on current Claude models, but sampling is still not a guarantee. |
 | A tool is a pure function of its args and declared inputs | Enforced for the AST tool (it receives source text, never a path). A volatile tool declares its impurity with a TTL. |
+| A rule's value depends only on `ctx` calls that *succeeded* | Not assumed: a call that raises is recorded with a sentinel hash, so a key whose rule swallowed the error re-runs on every build until the call succeeds. |
 | Recomputing a value yields the same hash | Checked: after a CAS integrity failure the value is recomputed and the engine raises if the new hash differs, which turns a non-deterministic rule into a loud error rather than a silent divergence. |
 
 ## Where each property is verified
@@ -218,3 +243,5 @@ not a sandbox.**
 | Cycles raise instead of deadlocking | `tests/property/test_cycles.py`, `bench/bench_robustness.py` |
 | Tamper and poisoning detection | `tests/property/test_tamper.py`, `bench/bench_robustness.py` |
 | Hermeticity guard behaviour and limits | `tests/unit/test_hermeticity.py` |
+| A swallowed context failure still forces a re-run | `tests/unit/test_failed_context_calls.py` |
+| Imported traces *and* step records are revoked with their signer | `tests/unit/test_shared_cache.py` |

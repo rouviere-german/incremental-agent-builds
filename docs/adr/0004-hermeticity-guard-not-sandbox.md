@@ -58,6 +58,14 @@ value.
 - **Anything outside a rule body.** Tool handlers run in a worker thread with the marker cleared,
   because they are *expected* to do I/O; their purity is enforced by their interface instead (declared
   inputs, args-only, read-only capability).
+- **A rule that goes through the context and then ignores the answer.** The guard checks *where* an
+  input came from, not what the rule did with it. A rule that catches the exception from a failed
+  `ctx.llm`, `ctx.tool` or `ctx.need` and returns a fallback is hermetic and still wrong: the value it
+  produced is a function of the provider being down, which is nothing the trace can see. That one is
+  handled by recording rather than by the guard — a call that raises enters the trace with a sentinel
+  hash no real value can equal, so the key re-runs until the call succeeds
+  (`tests/unit/test_failed_context_calls.py`, docs/SEMANTICS.md). A rule *should* let the exception
+  propagate; the sentinel is what keeps a rule that does not from caching a degraded artifact.
 
 **Therefore the threat model does not rely on it.** The controls that face untrusted input are the
 workspace jail (`realpath`, no `..`, size caps), the subprocess-isolated AST parser, the read-only tool
