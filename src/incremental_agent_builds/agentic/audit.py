@@ -3,13 +3,20 @@
 Each line is the canonical JSON of ``{seq, ts, actor, action, data, prev_hash, hash}`` where
 ``hash = sha256(canonical_json(entry without hash))`` and ``prev_hash`` is the previous entry's
 hash (64 zeros for the first). Verification detects edited, deleted, inserted and reordered
-entries and re-encoded lines. Truncating the *tail* leaves a valid shorter chain, so callers that
-need to detect it record the head hash elsewhere and pass ``--expect-head``.
+entries and re-encoded lines.
+
+Truncating the *tail* leaves a valid shorter chain, so the head is anchored outside the log: every
+open and every append records ``{entries, head}`` in a sidecar ``<name>.head`` file, and both
+:func:`verify_file` and opening an :class:`AuditLog` compare the chain against it by default. A
+truncated or rolled-back log therefore fails without the operator having to remember a hash, and
+``--expect-head`` remains for an anchor kept somewhere the writer cannot reach. The sidecar is a
+control against truncation and rollback, not against an attacker with write access: whoever can
+rebuild the chain can rewrite the sidecar too (docs/THREAT_MODEL.md, T5).
 
 Writers take a file lock per append, so several writers (threads, instances or processes) extend
 one chain instead of forking it. A writer also refuses to extend a file that shrank or whose last
 known entry changed since it last read it, so truncation or rewriting while the log is open is
-detected at the next append even without an external head anchor.
+detected at the next append as well.
 
 Usage: ``python -m incremental_agent_builds.agentic.audit verify audit.jsonl [--expect-head HASH]``
 """
@@ -31,12 +38,22 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from incremental_agent_builds.agentic.errors import AuditIntegrityError
 from incremental_agent_builds.core.canonical import canonical_json, sha256_hex
-from incremental_agent_builds.core.fileio import file_lock
+from incremental_agent_builds.core.fileio import atomic_write_text, file_lock
 from incremental_agent_builds.core.redaction import redact_value
 
-__all__ = ["GENESIS_HASH", "AuditEntry", "AuditLog", "VerifyResult", "main", "verify_file"]
+__all__ = [
+    "GENESIS_HASH",
+    "AuditEntry",
+    "AuditLog",
+    "VerifyResult",
+    "anchor_path",
+    "main",
+    "read_anchor",
+    "verify_file",
+]
 
 GENESIS_HASH = "0" * 64
+_HEAD_MISMATCH = "head mismatch (truncated or rolled back)"
 
 
 class AuditEntry(BaseModel):
@@ -100,6 +117,51 @@ def _verify_chain(raw: bytes, *, prev: str, seq: int) -> VerifyResult:  # noqa: 
     return VerifyResult(True, count, prev)
 
 
+def anchor_path(path: Path) -> Path:
+    """Where the head of ``path``'s chain is recorded, outside the log itself."""
+    return path.with_name(f"{path.name}.head")
+
+
+def read_anchor(path: Path) -> tuple[int, str] | None:
+    """The anchored ``(entries, head)`` for ``path``, or None when there is no readable anchor."""
+    file = anchor_path(path)
+    if not file.exists():
+        return None
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+        return int(data["entries"]), str(data["head"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _write_anchor(path: Path, *, entries: int, head: str) -> None:
+    payload = json.dumps({"entries": entries, "head": head}, sort_keys=True) + "\n"
+    atomic_write_text(anchor_path(path), payload)
+
+
+def _hash_at(raw: bytes, seq: int) -> str | None:
+    """The chain head after ``seq`` entries of ``raw``, or None when it holds fewer than that.
+
+    Only called on a chain :func:`_verify_chain` has already accepted, so each line's ``hash`` field
+    is known to be the hash of that entry and of everything before it.
+    """
+    if seq == 0:
+        return GENESIS_HASH
+    lines = raw[:-1].split(b"\n") if raw else []
+    if seq > len(lines):
+        return None
+    try:
+        return str(json.loads(lines[seq - 1])["hash"])
+    except (ValueError, TypeError, KeyError):  # pragma: no cover - the chain verified above
+        return None
+
+
+def _anchor_holds(path: Path, raw: bytes) -> bool:
+    """Whether the anchored head is still a prefix of this chain (True when none is recorded)."""
+    anchor = read_anchor(path)
+    return anchor is None or _hash_at(raw, anchor[0]) == anchor[1]
+
+
 def _last_line(raw: bytes) -> bytes:
     """The final ``\\n``-terminated line of ``raw`` (empty for empty input)."""
     if not raw:
@@ -107,15 +169,24 @@ def _last_line(raw: bytes) -> bytes:
     return raw[raw.rfind(b"\n", 0, len(raw) - 1) + 1 :]
 
 
-def verify_file(path: Path, *, expect_head: str | None = None) -> VerifyResult:
-    """Verify the whole chain. Returns the first failure with its 1-based line number."""
+def verify_file(
+    path: Path, *, expect_head: str | None = None, use_anchor: bool = True
+) -> VerifyResult:
+    """Verify the whole chain. Returns the first failure with its 1-based line number.
+
+    The sidecar head anchor is checked unless ``use_anchor`` is False, which is how a caller asks
+    what the chain alone says. ``expect_head`` is checked on top of it.
+    """
     if not path.exists():
         return VerifyResult(False, 0, GENESIS_HASH, "audit log not found", None)
-    result = _verify_chain(path.read_bytes(), prev=GENESIS_HASH, seq=0)
-    if result.ok and expect_head is not None and expect_head != result.head:
-        return VerifyResult(
-            False, result.entries, result.head, "head mismatch (truncated or rolled back)", None
-        )
+    raw = path.read_bytes()
+    result = _verify_chain(raw, prev=GENESIS_HASH, seq=0)
+    if not result.ok:
+        return result
+    if use_anchor and not _anchor_holds(path, raw):
+        return VerifyResult(False, result.entries, result.head, _HEAD_MISMATCH, None)
+    if expect_head is not None and expect_head != result.head:
+        return VerifyResult(False, result.entries, result.head, _HEAD_MISMATCH, None)
     return result
 
 
@@ -136,9 +207,14 @@ class AuditLog:
         path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(path):
             raw = path.read_bytes() if path.exists() else b""
-        result = _verify_chain(raw, prev=GENESIS_HASH, seq=0)
-        if not result.ok:
-            raise AuditIntegrityError(f"{path.name}: {result.error} (line {result.line})")
+            result = _verify_chain(raw, prev=GENESIS_HASH, seq=0)
+            if not result.ok:
+                raise AuditIntegrityError(f"{path.name}: {result.error} (line {result.line})")
+            # A truncated chain is itself a valid chain, so without the anchor a fresh process
+            # would adopt one and keep appending to it.
+            if not _anchor_holds(path, raw):
+                raise AuditIntegrityError(f"{path.name}: {_HEAD_MISMATCH}")
+            _write_anchor(path, entries=result.entries, head=result.head)
         self._seq = result.entries
         self._head = result.head
         self._size = len(raw)
@@ -211,10 +287,12 @@ class AuditLog:
         return entry, line
 
     def _write(self, payload: bytes) -> None:
+        """Append, then re-anchor. The caller holds the file lock, so the anchor cannot race it."""
         with self._path.open("ab") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        _write_anchor(self._path, entries=self._seq, head=self._head)
 
     def append(
         self, actor: str, action: str, data: Mapping[str, JsonValue] | None = None

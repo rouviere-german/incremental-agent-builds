@@ -10,7 +10,13 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from incremental_agent_builds.agentic.audit import AuditLog, main, verify_file
+from incremental_agent_builds.agentic.audit import (
+    AuditLog,
+    anchor_path,
+    main,
+    read_anchor,
+    verify_file,
+)
 from incremental_agent_builds.agentic.errors import AuditIntegrityError
 from incremental_agent_builds.core.canonical import canonical_json, sha256_hex
 
@@ -90,16 +96,86 @@ def test_deletion_reordering_reencoding_and_truncation_are_detected(
     assert result.error == error
 
 
-def test_tail_truncation_needs_an_anchored_head(tmp_path: Path) -> None:
+# --- tail truncation and the head anchor --------------------------------------------------------
+#
+# Dropping the last lines of the log leaves a valid, shorter chain: the hash chain alone cannot tell
+# a log that was truncated from one that was always that long. That is why the head is anchored in a
+# sidecar file on every open and every append, and why both verification and opening the log check
+# it. It defends against truncation and rollback, not against someone who can rewrite both files.
+
+
+def test_tail_truncation_is_caught_by_the_stored_head_anchor(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
-    log = write_log(path)
-    head = log.head
-    path.write_text("".join(lines_of(path)[:-1]), encoding="utf-8", newline="\n")
+    write_log(path)
+    path.write_text("".join(lines_of(path)[:-2]), encoding="utf-8", newline="\n")
+
+    result = verify_file(path)
+    assert not result.ok
+    assert result.error is not None
+    assert "head mismatch" in result.error
+    assert result.entries == 3, "the surviving prefix is still reported"
+
+
+def test_the_chain_alone_cannot_see_tail_truncation(tmp_path: Path) -> None:
+    """Why the anchor exists: ``use_anchor=False`` is the view the chain gives on its own."""
+    path = tmp_path / "audit.jsonl"
+    write_log(path)
+    path.write_text("".join(lines_of(path)[:-2]), encoding="utf-8", newline="\n")
+    assert verify_file(path, use_anchor=False).ok
+
+
+def test_a_truncated_log_cannot_be_reopened_and_extended(tmp_path: Path) -> None:
+    """The failure the anchor is really for: a fresh process adopting a truncated chain."""
+    path = tmp_path / "audit.jsonl"
+    write_log(path)
+    path.write_text("".join(lines_of(path)[:-2]), encoding="utf-8", newline="\n")
+    with pytest.raises(AuditIntegrityError, match="truncated or rolled back"):
+        AuditLog(path, clock=fixed_clock())
+
+
+def test_deleting_the_anchor_leaves_truncation_undetectable(tmp_path: Path) -> None:
+    """Honest limit: whoever can truncate the log can usually delete the sidecar as well."""
+    path = tmp_path / "audit.jsonl"
+    write_log(path)
+    path.write_text("".join(lines_of(path)[:-2]), encoding="utf-8", newline="\n")
+    anchor_path(path).unlink()
+
+    assert verify_file(path).ok, "nothing is anchored any more, so nothing contradicts the chain"
+    anchored = verify_file(path, expect_head="c" * 64)
+    assert not anchored.ok, "an externally kept head still catches it"
+
+
+def test_the_anchor_follows_every_append(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    log = write_log(path, entries=3)
+    assert read_anchor(path) == (3, log.head)
+    entry = log.append("agent:test", "step", {"index": 3})
+    assert read_anchor(path) == (4, entry.hash)
     assert verify_file(path).ok
-    anchored = verify_file(path, expect_head=head)
-    assert not anchored.ok
-    assert anchored.error is not None
-    assert "head mismatch" in anchored.error
+
+
+def test_an_anchor_left_behind_by_a_lost_write_is_accepted(tmp_path: Path) -> None:
+    """An anchor that names a prefix of the chain is stale, not evidence of tampering."""
+    path = tmp_path / "audit.jsonl"
+    log = write_log(path, entries=3)
+    stale = read_anchor(path)
+    assert stale is not None
+    log.append("agent:test", "step", {"index": 3})
+    anchor_path(path).write_text(
+        json.dumps({"entries": stale[0], "head": stale[1]}), encoding="utf-8"
+    )
+
+    assert verify_file(path).ok
+    reopened = AuditLog(path, clock=fixed_clock())
+    assert read_anchor(path) == (4, reopened.head), "opening re-anchors at the real head"
+
+
+def test_an_unreadable_anchor_is_ignored(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    write_log(path, entries=2)
+    anchor_path(path).write_text("{not json", encoding="utf-8")
+    assert read_anchor(path) is None
+    assert verify_file(path).ok
 
 
 @settings(max_examples=40)
