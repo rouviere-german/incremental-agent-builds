@@ -27,8 +27,24 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # A plan projected above this many micro-USD needs an approval before it executes.
       APP_PLAN_APPROVAL_USD_MICROS: ${APP_PLAN_APPROVAL_USD_MICROS:-250000}
+      # The per-build budget. The step cap is raised above the application default of 50 because a
+      # cold build of the reference workspace does not fit under it: `iab init` (seed 7, 80 modules)
+      # followed by one build executes 287 rules and 81 LLM steps, and a build that crosses the cap
+      # aborts with "budget exhausted" rather than finishing. Measured inside this image with the
+      # offline deterministic provider (no ANTHROPIC_API_KEY) and the caps lifted, by running
+      # `python -m incremental_agent_builds init` then `... build` against the mounted volume:
+      #   executed 287, llm_steps 81, tokens 61692, usd_micros 465220, duration 2.78s
+      # The token and USD caps are left at the application defaults: those, not the step count, are
+      # what bounds real spend, so raising only the step cap does not widen the money guard.
+      APP_BUDGET_MAX_STEPS: ${APP_BUDGET_MAX_STEPS:-200}
+      APP_BUDGET_MAX_TOKENS: ${APP_BUDGET_MAX_TOKENS:-200000}
+      APP_BUDGET_MAX_USD: ${APP_BUDGET_MAX_USD:-1.0}
       APP_BUILD_JOBS: "4"
-      # Rules must not read outside BuildContext; in production violations are counted, not fatal.
+      # Rules must not read outside BuildContext. Counted, not fatal, and it has to stay that way
+      # for now: `strict` fails every module_outline rule in this image, because the engine's own
+      # CAS write after a tool or LLM step happens outside io_permit() and is recorded against the
+      # rule that triggered it (644 per cold build: 161 os.mkdir + 161 os.rename + 322 open, every
+      # detail a path under store/cas). Those are the engine's writes, not the rules' reads.
       APP_BUILD_GUARD_MODE: warn
     volumes:
       - iab-store:/var/lib/iab
