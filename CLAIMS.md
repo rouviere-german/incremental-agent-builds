@@ -170,7 +170,7 @@ Numbers come from `bench/` runs on Windows 10, Intel i7-8750H (6 cores), Python 
 |---|---|---|
 | ruff lint and format are clean | `.github/workflows/ci.yml#lint` | |
 | mypy `--strict` is clean over src, tests, scripts, bench and tasks.py | `.github/workflows/ci.yml#typecheck` | |
-| Test coverage is at or above 85% | `.github/workflows/ci.yml#test` | `fail_under = 85` in pyproject.toml; measured 94% |
+| Test coverage is at or above 85% | `.github/workflows/ci.yml#test` | `fail_under = 85` in pyproject.toml; measured 94.86% branch coverage over 801 tests |
 | bandit, semgrep (registry packs plus repo rules), pip-audit and gitleaks all run | `.github/workflows/ci.yml#bandit`, `.github/workflows/ci.yml#semgrep`, `.github/workflows/ci.yml#audit`, `.github/workflows/ci.yml#secrets` | |
 | The container is non-root, read-only, capability-dropped, digest-pinned, scanned by trivy, and ships an SBOM | `.github/workflows/ci.yml#docker` | Plus a smoke test asserting the HEALTHCHECK reports healthy as UID 10001 |
 | Every benchmark has a regression threshold enforced in CI | `bench/thresholds.json`, `.github/workflows/ci.yml#bench`, `.github/workflows/ci.yml#savings` | Each threshold carries a `_note` saying where it came from |
