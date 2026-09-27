@@ -12,7 +12,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import structlog
@@ -23,7 +23,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from incremental_agent_builds.core.errors import BodyTooLargeError, error_payload
 from incremental_agent_builds.core.metrics import HttpMetrics
 from incremental_agent_builds.core.ratelimit import RateLimiter
-from incremental_agent_builds.core.security import ApiKeyVerifier, extract_api_key
+from incremental_agent_builds.core.security import (
+    ApiKeyVerifier,
+    extract_api_key,
+    extract_bearer_token,
+)
 
 __all__ = [
     "SECURITY_HEADERS",
@@ -59,6 +63,11 @@ async def _send_json(
     ]
     await send({"type": "http.response.start", "status": status, "headers": raw_headers})
     await send({"type": "http.response.body", "body": payload})
+
+
+def _short_hash(value: str) -> str:
+    """A stable, non-reversible bucket id: identities never enter the limiter's state in clear."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
 def client_bucket(host: str) -> str:
@@ -163,11 +172,18 @@ class RequestContextMiddleware:
 
 
 class RateLimitMiddleware:
-    """Token-bucket limit per authenticated key, or per client address when unauthenticated.
+    """Token-bucket limit per authenticated caller, or per client address when unauthenticated.
 
-    The key is verified here (a hash plus constant-time compares) so random invalid keys cannot be
-    used to mint fresh buckets; invalid keys share the caller's address bucket. IPv6 addresses are
-    grouped by /64 (see :func:`client_bucket`).
+    Buckets are chosen most specific first: the subject of a valid bearer token, then the API key,
+    then the source address. The bearer subject matters because the routes that spend money
+    authenticate with scoped JWTs through FastAPI dependencies, which run *after* ASGI middleware:
+    without it every token holder behind one proxy would share a single address bucket, and every
+    token holder on its own address would get a full one.
+
+    Credentials are verified here (constant-time compares for the API key, full JWT verification via
+    ``bearer_subject``) so random invalid ones cannot be used to mint fresh buckets; they share the
+    caller's address bucket instead. IPv6 addresses are grouped by /64 (see :func:`client_bucket`).
+    Identities are hashed into the bucket key, so no subject travels into the limiter's own state.
     """
 
     def __init__(
@@ -177,27 +193,34 @@ class RateLimitMiddleware:
         limiter: RateLimiter,
         verifier: ApiKeyVerifier,
         metrics: HttpMetrics,
+        bearer_subject: Callable[[str | None], str | None] | None = None,
         exempt_paths: frozenset[str] = frozenset({"/healthz", "/readyz"}),
     ) -> None:
         self.app = app
         self.limiter = limiter
         self.verifier = verifier
         self.metrics = metrics
+        self.bearer_subject = bearer_subject
         self.exempt_paths = exempt_paths
+
+    def _bucket_key(self, scope: Scope) -> str:
+        headers = Headers(scope=scope)
+        if self.bearer_subject is not None:
+            subject = self.bearer_subject(extract_bearer_token(headers))
+            if subject is not None:
+                return "sub:" + _short_hash(subject)
+        principal = self.verifier.verify(extract_api_key(headers))
+        if principal is not None:
+            return f"key:{principal.key_id}"
+        client = scope.get("client")
+        host = client[0] if client else "unknown"
+        return "ip:" + _short_hash(client_bucket(str(host)))
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") in self.exempt_paths:
             await self.app(scope, receive, send)
             return
-        principal = self.verifier.verify(extract_api_key(Headers(scope=scope)))
-        if principal is not None:
-            key = f"key:{principal.key_id}"
-        else:
-            client = scope.get("client")
-            host = client[0] if client else "unknown"
-            bucket = client_bucket(str(host))
-            key = "ip:" + hashlib.sha256(bucket.encode("utf-8")).hexdigest()[:32]
-        decision = self.limiter.check(key)
+        decision = self.limiter.check(self._bucket_key(scope))
         if not decision.allowed:
             self.metrics.rate_limited_total.inc()
             await _send_json(

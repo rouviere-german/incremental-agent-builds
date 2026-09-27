@@ -110,7 +110,15 @@ def create_app(
 
     # add_middleware prepends, so the last one added is the outermost.
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=cfg.max_body_bytes, metrics=metrics)
-    app.add_middleware(RateLimitMiddleware, limiter=limiter, verifier=verifier, metrics=metrics)
+    app.add_middleware(
+        RateLimitMiddleware,
+        limiter=limiter,
+        verifier=verifier,
+        metrics=metrics,
+        # Scoped routes authenticate with bearer tokens through FastAPI dependencies, which run
+        # after this middleware, so the limiter verifies the token itself to bucket per subject.
+        bearer_subject=app.state.jwt_verifier.subject_of,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(cfg.cors_allow_origins),

@@ -25,6 +25,7 @@ __all__ = [
     "AuthenticatedPrincipal",
     "Principal",
     "extract_api_key",
+    "extract_bearer_token",
     "generate_api_key",
     "hash_api_key",
     "require_api_key",
@@ -80,6 +81,14 @@ def extract_api_key(headers: Mapping[str, str]) -> str | None:
     value = headers.get("x-api-key")
     if value:
         return value
+    auth = headers.get("authorization")
+    if auth and auth[:7].lower() == "bearer ":
+        return auth[7:].strip() or None
+    return None
+
+
+def extract_bearer_token(headers: Mapping[str, str]) -> str | None:
+    """Read the token from ``Authorization: Bearer <token>`` (None when there is none)."""
     auth = headers.get("authorization")
     if auth and auth[:7].lower() == "bearer ":
         return auth[7:].strip() or None

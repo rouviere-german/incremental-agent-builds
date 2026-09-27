@@ -36,6 +36,7 @@ from fastapi import Depends, Request
 
 from incremental_agent_builds.core.errors import AppError
 from incremental_agent_builds.core.logging import get_logger
+from incremental_agent_builds.core.security import extract_bearer_token
 
 __all__ = [
     "ALGORITHM",
@@ -171,12 +172,22 @@ class JwtVerifier:
             token_id=token_id if isinstance(token_id, str) else "",
         )
 
+    def subject_of(self, token: str | None) -> str | None:
+        """The verified subject of ``token``, or None when it is absent or invalid.
+
+        The rate limiter needs the caller's identity, but it runs as ASGI middleware and therefore
+        before the route dependency that authenticates the request. This gives it the subject with
+        the same strict verification and without raising: a token that does not verify simply gets
+        no identity and shares its source address's bucket.
+        """
+        try:
+            return self.verify(token).subject
+        except AppError:
+            return None
+
 
 def _bearer_token(request: Request) -> str | None:
-    header = request.headers.get("authorization")
-    if header and header[:7].lower() == "bearer ":
-        return header[7:].strip() or None
-    return None
+    return extract_bearer_token(request.headers)
 
 
 def require_scope(*required: Scope) -> Any:
