@@ -3,6 +3,13 @@
 Each method records what it read and the hash of what it returned, in call order, as one
 dependency group. Those groups become the rule's verifying trace. ``need_all`` records its keys as
 a single group, so verification can bring them up to date in parallel.
+
+A call that *raises* is recorded too, as a dependency with the sentinel hash
+:data:`~.hashing.ERROR_HASH`. A rule is expected to let the exception propagate, but one that
+catches it and returns a degraded value would otherwise leave a trace that never mentions the
+failed call: the next build would verify it, find every recorded input unchanged and serve the
+degraded value with the provider or tool healthy again. The sentinel can never equal a real hash,
+so the key re-runs until the call succeeds.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from incremental_agent_builds.engine.errors import (
     ToolStepError,
     WorkspaceError,
 )
+from incremental_agent_builds.engine.hashing import ERROR_HASH
 from incremental_agent_builds.engine.hermetic import io_permit
 from incremental_agent_builds.engine.keys import BuildKey
 from incremental_agent_builds.engine.llm import (
@@ -49,6 +57,13 @@ if TYPE_CHECKING:
 __all__ = ["BuildContext"]
 
 _CONFIG_KEY = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$"
+
+
+def _validate_config_key(dotted_key: str) -> None:
+    import re  # noqa: PLC0415 - deferred: only ctx.config needs the regex engine
+
+    if not re.fullmatch(_CONFIG_KEY, dotted_key):
+        raise WorkspaceError(f"invalid config key {dotted_key!r}")
 
 
 class BuildContext:
@@ -77,7 +92,14 @@ class BuildContext:
             raise RuleDefinitionError("BuildContext used after its rule returned")
 
     def _record(self, *deps: Dep) -> None:
-        self._groups.append(tuple(deps))
+        if self._recording:
+            self._groups.append(tuple(deps))
+
+    def _record_failure(self, kind: str, ref: str) -> None:
+        """Record that a context call raised, so the key can never be reused on this trace."""
+        self._record(Dep(DepKind.ERROR, f"{kind}:{ref}", ERROR_HASH))
+        if self._recording:
+            self._session.audit("context_call_failed", {"key": self.key.key_id, "call": kind})
 
     def dep_groups(self) -> DepGroups:
         return tuple(self._groups)
@@ -112,12 +134,16 @@ class BuildContext:
             return []
         unique = list({key.key_id: key for key in keys}.values())
         session = self._session
-        async with self._suspended():
-            results = await session.ensure_many(unique, self.key.key_id)
-            values = {
-                key.key_id: await session.value_of(key, result.hash)
-                for key, result in zip(unique, results, strict=True)
-            }
+        try:
+            async with self._suspended():
+                results = await session.ensure_many(unique, self.key.key_id)
+                values = {
+                    key.key_id: await session.value_of(key, result.hash)
+                    for key, result in zip(unique, results, strict=True)
+                }
+        except BaseException:
+            self._record_failure("need", unique[0].key_id)
+            raise
         self._record(*(Dep(DepKind.RULE, result.key_id, result.hash) for result in results))
         return [values[key.key_id] for key in keys]
 
@@ -126,9 +152,13 @@ class BuildContext:
     async def read_bytes(self, path: str) -> bytes | None:
         """File content (None if missing). Jailed to the workspace and fingerprinted."""
         self._check_open()
-        validate_relative_path(path)
-        with io_permit():
-            data, digest = self._session.file_input(path)
+        try:
+            validate_relative_path(path)
+            with io_permit():
+                data, digest = self._session.file_input(path)
+        except BaseException:
+            self._record_failure("read", path)
+            raise
         self._record(Dep(DepKind.FILE, path, digest))
         return data
 
@@ -145,20 +175,25 @@ class BuildContext:
     async def glob(self, pattern: str) -> list[str]:
         """Sorted workspace paths matching ``pattern``; adding or removing a match invalidates."""
         self._check_open()
-        with io_permit():
-            paths, digest = self._session.glob_input(pattern)
+        try:
+            with io_permit():
+                paths, digest = self._session.glob_input(pattern)
+        except BaseException:
+            self._record_failure("glob", pattern)
+            raise
         self._record(Dep(DepKind.GLOB, pattern, digest))
         return list(paths)
 
     async def config(self, dotted_key: str) -> JsonValue | None:
         """One value from the workspace config file (``iab.toml``), tracked by key, not file."""
-        import re  # noqa: PLC0415
-
         self._check_open()
-        if not re.fullmatch(_CONFIG_KEY, dotted_key):
-            raise WorkspaceError(f"invalid config key {dotted_key!r}")
-        with io_permit():
-            value, digest = self._session.config_input(dotted_key)
+        try:
+            _validate_config_key(dotted_key)
+            with io_permit():
+                value, digest = self._session.config_input(dotted_key)
+        except BaseException:
+            self._record_failure("config", dotted_key)
+            raise
         self._record(
             Dep(DepKind.CONFIG, f"{self._session.config.config_path}#{dotted_key}", digest)
         )
@@ -169,6 +204,13 @@ class BuildContext:
     async def tool(self, name: str, args: Mapping[str, JsonValue]) -> JsonValue:
         """Run a registered read-only tool (memoized by tool, version, args and input hashes)."""
         self._check_open()
+        try:
+            return await self._tool_call(name, args)
+        except BaseException:
+            self._record_failure("tool", name)
+            raise
+
+    async def _tool_call(self, name: str, args: Mapping[str, JsonValue]) -> JsonValue:
         session = self._session
         try:
             tool = session.engine.tools.get(name)
@@ -237,6 +279,23 @@ class BuildContext:
         """One LLM step. Variables enter the prompt only as quoted untrusted data; the output
         must validate against ``schema``; no tools are offered to the model."""
         self._check_open()
+        try:
+            return await self._llm_call(
+                template_id, variables, model=model, schema=schema, max_tokens=max_tokens
+            )
+        except BaseException:
+            self._record_failure("llm", template_id)
+            raise
+
+    async def _llm_call[M: BaseModel](
+        self,
+        template_id: str,
+        variables: Mapping[str, JsonValue],
+        *,
+        model: str,
+        schema: type[M],
+        max_tokens: int,
+    ) -> M:
         session = self._session
         template_bytes = await self.read_bytes(template_path(template_id))
         if template_bytes is None:

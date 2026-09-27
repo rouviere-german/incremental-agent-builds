@@ -151,6 +151,8 @@ def export_bundle(
             continue
         if not cas.contains(trace.result_hash):
             continue
+        if any(dep.kind is DepKind.ERROR for group in trace.deps for dep in group):
+            continue  # a trace whose recorded call raised can never verify, here or anywhere
         body = _trace_body(trace)
         entries.append(
             {"type": "trace", "body": body, "signer": signer.key_id, "signature": signer.sign(body)}

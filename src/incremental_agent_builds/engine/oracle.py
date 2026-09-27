@@ -59,6 +59,9 @@ def unnecessary_reruns(  # noqa: PLR0912 - one branch per dependency kind, kept 
                             now = session.glob_input(dep.ref)[1]
                         case DepKind.CONFIG:
                             now = session.config_input(dep.ref.partition("#")[2])[1]
+                        case DepKind.ERROR:
+                            # A recorded failed call justifies the re-run on its own.
+                            now = None
                         case _:
                             continue
                 except WorkspaceError:

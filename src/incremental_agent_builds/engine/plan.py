@@ -198,6 +198,10 @@ class _Planner:
                     if isinstance(ttl, int | float) and session.now - step.recorded_at > ttl:
                         return "expired"
                     return step.result_hash
+                case DepKind.ERROR:
+                    # A call that raised during the last execution: the key is dirty whatever the
+                    # rest of its trace says, because nothing recorded can show it is up to date.
+                    return "failed-call"
                 case _:  # pragma: no cover - rule deps are handled separately
                     return dep.hash
         except WorkspaceError:
@@ -206,7 +210,11 @@ class _Planner:
     def _input_changed(self, dep: Dep) -> str | None:
         current = self._current_hash(dep)
         self.observed[f"{dep.kind.value} {dep.ref}"] = current
-        return None if current == dep.hash else f"{dep.kind.value} {dep.ref} changed"
+        if current == dep.hash:
+            return None
+        if dep.kind is DepKind.ERROR:
+            return f"{dep.ref} failed during the last execution"
+        return f"{dep.kind.value} {dep.ref} changed"
 
     def _own_reason(self, key_id: str, trace: Trace | None) -> str | None:
         key = self.engine.rules.key_from_id(key_id)

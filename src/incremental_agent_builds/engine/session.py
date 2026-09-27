@@ -65,8 +65,6 @@ if TYPE_CHECKING:
 
 __all__ = ["BuildSession", "BuildStats", "KeyResult"]
 
-_ERROR_HASH = "error"
-
 
 @dataclass
 class BuildStats:
@@ -311,6 +309,10 @@ class BuildSession:
                     return step is not None and step.kind == "llm" and step.result_hash == dep.hash
                 case DepKind.TOOL:
                     return await self._tool_matches(dep)
+                case DepKind.ERROR:
+                    # A call the last execution made raised. Whatever it would return now, this
+                    # trace cannot show the key is up to date, so it always re-runs.
+                    return False
                 case _:  # pragma: no cover - rule deps are handled by _verify
                     return False
         except WorkspaceError:
@@ -533,8 +535,11 @@ class BuildSession:
                     if not self.config.early_cutoff and result.executed:
                         return f"{dep.ref} was rebuilt (early cutoff disabled)"
             for dep in group:
-                if dep.kind is not DepKind.RULE and not await self._input_matches(dep):
-                    return f"{dep.kind.value} {dep.ref} changed"
+                if dep.kind is DepKind.RULE or await self._input_matches(dep):
+                    continue
+                if dep.kind is DepKind.ERROR:
+                    return f"{dep.ref} failed during the last execution"
+                return f"{dep.kind.value} {dep.ref} changed"
         return None
 
     async def _compute(self, key: BuildKey) -> KeyResult:

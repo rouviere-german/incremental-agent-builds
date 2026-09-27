@@ -100,6 +100,11 @@ class DepKind(StrEnum):
     CONFIG = "config"
     LLM = "llm"
     TOOL = "tool"
+    #: A context call that raised. Recorded with :data:`~.hashing.ERROR_HASH`, which no real value
+    #: can hash to, so the key re-runs until the call succeeds. See
+    #: :meth:`~.context.BuildContext._record_failure`.
+    ERROR = "error"
+
 
 @dataclass(frozen=True, slots=True)
 class Dep:

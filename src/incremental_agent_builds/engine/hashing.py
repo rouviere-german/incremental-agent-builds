@@ -3,8 +3,9 @@
 Rule values are JSON values. Their hash is the SHA-256 of their canonical JSON encoding
 (:mod:`incremental_agent_builds.core.canonical`), so two values hash equally exactly when they are
 equal as JSON (key order and whitespace never matter). File dependencies hash raw bytes. A missing
-input has the fixed hash :data:`MISSING`, which is not a valid SHA-256 hex digest and therefore
-never equals the hash of any content.
+input has the fixed hash :data:`MISSING`, and a call that raised is recorded with
+:data:`ERROR_HASH`. Neither is a valid SHA-256 hex digest, so neither ever equals the hash of any
+content: a recorded dependency carrying one can only ever mismatch.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pydantic import JsonValue
 from incremental_agent_builds.core.canonical import canonical_json, sha256_hex
 
 __all__ = [
+    "ERROR_HASH",
     "MISSING",
     "SHA256_HEX",
     "canonical_bytes",
@@ -24,6 +26,7 @@ __all__ = [
 ]
 
 MISSING = "missing"
+ERROR_HASH = "error"
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
