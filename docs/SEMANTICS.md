@@ -168,8 +168,8 @@ caught immediately. Keys not in the cycle still build.
 
 The check is exact reachability, so its cost grows with the number of simultaneously suspended keys.
 The cheap precondition — a target that waits for nothing cannot close a ring — removes the graph
-search in the common case, which is what keeps a 1,000-rule no-op rebuild at 322 ms p95 rather than
-437 ms.
+search in the common case, which is what took a 1,000-rule no-op rebuild from 437 ms p95 to 310 ms on
+the machine in the README.
 
 **Failures** are per key: a rule that raises fails that key and everything that needs it, while
 unrelated targets still complete. A **budget exhaustion** aborts the whole build, but traces of keys

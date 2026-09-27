@@ -56,11 +56,11 @@ Numbers come from `bench/` runs on Windows 10, Intel i7-8750H (6 cores), Python 
 
 | Claim | Evidence | Notes |
 |---|---|---|
-| A no-op rebuild of 1,000 rules takes 322 ms p95 (spec target: under 500 ms) | `bench/bench_baseline.py`, `.github/workflows/ci.yml#bench` | CI enforces 1,200 ms for shared-runner noise; `bench/thresholds.json` explains why |
-| Planning 1,000 rules takes 86 ms p95 | `bench/bench_baseline.py` | |
-| Loading and authenticating 1,000 trace rows takes 57 ms p95 | `bench/bench_baseline.py` | The floor cost of any build |
-| An LLM step fingerprint costs 31 µs p95 | `bench/bench_baseline.py` | |
-| Batched audit appends keep one fsync for a whole build's entries | `bench/bench_baseline.py` (`audit_append_many_200`) | 200 entries in 23 ms p95 versus 10 ms each individually |
+| A no-op rebuild of 1,000 rules takes 310 ms p95 (spec target: under 500 ms) | `bench/bench_baseline.py`, `.github/workflows/ci.yml#bench` | Repeated runs land between 310 and 325 ms. CI enforces 1,200 ms for shared-runner noise; `bench/thresholds.json` explains why |
+| Planning 1,000 rules takes 99 ms p95 | `bench/bench_baseline.py` | |
+| Loading and authenticating 1,000 trace rows takes 51 ms p95 | `bench/bench_baseline.py` | The floor cost of any build |
+| An LLM step fingerprint costs 23 µs p95 | `bench/bench_baseline.py` | |
+| Batched audit appends keep one fsync for a whole build's entries | `bench/bench_baseline.py` (`audit_append_many_200`) | 200 entries in 23.5 ms p95, versus 8.5 ms each appended individually |
 
 ## LLM steps
 

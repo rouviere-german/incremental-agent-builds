@@ -240,20 +240,23 @@ is diluted because most commits touch little — the per-commit maximum is where
 
 | Benchmark | p50 | p95 |
 |---|---:|---:|
-| **No-op rebuild, 1,000 rules** | 283 ms | **322 ms** |
-| Cold build, 1,000 rules | 433 ms | 512 ms |
-| Plan (dirty set + cost), 1,000 rules | 73.7 ms | 86.2 ms |
-| Load + authenticate 1,000 trace rows | 35.4 ms | 57.3 ms |
-| LLM step fingerprint | 19.0 µs | 30.6 µs |
-| CAS verified read, 4 KB | 239 µs | 549 µs |
-| Audit append, batched (200 entries, one fsync) | 22.1 ms | 23.3 ms |
-| Audit chain verify, 1,000 entries | 37.3 ms | 38.9 ms |
+| **No-op rebuild, 1,000 rules** | 293 ms | **310 ms** |
+| Cold build, 1,000 rules | 452 ms | 507 ms |
+| Plan (dirty set + cost), 1,000 rules | 75.5 ms | 99.3 ms |
+| Load + authenticate 1,000 trace rows | 33.6 ms | 51.3 ms |
+| LLM step fingerprint | 18.4 µs | 22.9 µs |
+| CAS verified read, 4 KB | 208 µs | 295 µs |
+| Audit append, batched (200 entries, one fsync) | 22.3 ms | 23.5 ms |
+| Audit chain verify, 1,000 entries | 34.4 ms | 36.3 ms |
 
-The no-op rebuild target from the spec was <500 ms for 1,000 rules; measured 322 ms p95. CI enforces
-1,200 ms for this row, because shared runners are slower and noisier than this laptop — the threshold
-is a regression guard, not the claim. Every threshold and where it comes from is in
-`bench/thresholds.json`; [CLAIMS.md](CLAIMS.md) maps each statement above to the test, bench or CI job
-that backs it.
+The no-op rebuild target from the spec was <500 ms for 1,000 rules; measured 310 ms p95 (repeated
+runs on this machine land between 310 and 325 ms). CI enforces 1,200 ms for this row, because shared
+runners are slower and noisier than this laptop — the threshold is a regression guard, not the claim.
+Every threshold and where it came from is in `bench/thresholds.json`; [CLAIMS.md](CLAIMS.md) maps each
+statement above to the test, bench or CI job that backs it.
+
+Loading and authenticating the trace rows is about a sixth of the no-op rebuild, and it is the floor:
+every build pays it before it can decide that there is nothing to do.
 
 ## Security
 
