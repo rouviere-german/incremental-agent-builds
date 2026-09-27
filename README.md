@@ -142,7 +142,9 @@ uv run python tasks.py demo           # the end-to-end story, offline, ~40s
 
 No API key is needed anywhere above: `FakeProvider` answers as a pure function of the request, so the
 pipeline is fully reproducible offline. With `ANTHROPIC_API_KEY` set, the same commands use the real
-Anthropic API through the same provider interface.
+Anthropic API through the same provider interface — that path is verified against a mocked client
+(request construction, `stop_reason` including refusals, the server-side fallback, the typed error
+chain) and has never made a live call, so treat it as untested against the real service.
 
 The HTTP service exposes the same operations behind three scopes (`build:run`, `build:approve`,
 `cache:import`):
