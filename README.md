@@ -296,6 +296,10 @@ written by someone hostile, and that the model may be talked into anything.
   verified with a pinned algorithm and required `exp`/`iat`/`nbf`/`iss`/`aud`/`sub`, and the routes
   fail closed (503) when no secret is configured.
 
+Reuse is observable rather than only benchmarkable: `/metrics` separates rules executed (by rule),
+reused and cut off, tokens not spent again, and cache-import rejections by reason, and each rule gets
+a span carrying its outcome, the reason it ran and its dependency counts per kind.
+
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) has the STRIDE table with a test for every control.
 [SECURITY.md](SECURITY.md) has reporting.
 
@@ -309,9 +313,10 @@ written by someone hostile, and that the model may be talked into anything.
   results between stores.
 - **No distributed execution.** The scheduler bounds concurrency within one process. Remote workers
   are out of scope; the signed cache bundle covers the "someone else already computed this" case.
-- **No prompt-level caching or streaming.** Anthropic prompt caching, streaming and batch requests are
-  not wired in. They would reduce cost further and are orthogonal to the dependency tracking this
-  repo is about.
+- **No prompt caching or batch requests.** Anthropic prompt caching and the Batches API are not wired
+  in. They would cut the cost of the calls that *do* happen and are orthogonal to the dependency
+  tracking this repo is about. (The provider does stream responses above 16K `max_tokens`, because a
+  non-streaming request that large risks an SDK timeout that a retry would re-bill.)
 - **Rule *code* is not hashed.** A trace records the rule's declared `version`, not a hash of its
   source. Changing what a rule computes without bumping its version leaves stale values behind — see
   [docs/adr/0002](docs/adr/0002-verifying-traces-over-dirty-bits.md) for why, and
