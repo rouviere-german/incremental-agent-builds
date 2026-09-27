@@ -1,0 +1,58 @@
+{
+  "_about": {
+    "_note": "Regression thresholds enforced by `python tasks.py bench` and by CI. A metric ending in _min is a floor (must stay above), anything else is a limit (must stay below). Keys starting with _ are documentation and are not compared. Timing limits are set to roughly 3-4x the values measured on the machine recorded in bench/results/*.json, because shared CI runners are slower and noisy: they catch order-of-magnitude regressions, not drift. Correctness floors are exact (100%, 0) because anything else is a defect."
+  },
+  "noop_rebuild_1000_rules": {
+    "_note": "The spec's target is a no-op rebuild of 1k rules under 500 ms; 311 ms p95 was measured locally. The CI limit is looser so a slow shared runner does not fail the build; the README reports the measured number.",
+    "p95_ms": 1200
+  },
+  "plan_1000_rules": { "p95_ms": 600 },
+  "trace_store_load_1000_rows": { "p95_ms": 300 },
+  "value_hash_40_symbols": { "p95_us": 500 },
+  "cas_get_json_4kb": { "p95_us": 2000 },
+  "llm_step_fingerprint": { "p95_us": 200 },
+  "redact_text_1kb": { "p95_us": 3000 },
+  "rate_limiter_check": { "p95_us": 50 },
+  "llm_request_sha256_10_messages": { "p95_us": 1000 },
+  "audit_append_fsync": { "p95_us": 60000 },
+  "audit_append_many_200": { "p95_us": 200000 },
+  "audit_verify_1000_entries": { "p95_ms": 300 },
+
+  "replay_savings": {
+    "_note": "The spec's target is >= 80% of LLM calls and tokens saved across the 30-commit replay. Measured: 97.6% median / 92.7% total calls, 91.2% median / 88.8% total tokens.",
+    "median_calls_saved_min": 0.85,
+    "median_tokens_saved_min": 0.8,
+    "total_calls_saved_min": 0.8,
+    "total_tokens_saved_min": 0.75
+  },
+  "replay_correctness": {
+    "_note": "Not performance: a failure here means the incremental build produced a value a clean rebuild would not, or did work it did not need to.",
+    "clean_equivalent_pct_min": 100,
+    "unnecessary_reruns_max": 0,
+    "system_stale_artifacts_max": 0
+  },
+  "replay_ablations": {
+    "_note": "Each ablation must cost meaningfully more than the full system. Measured over 30 commits: 1.23x rules executed in aggregate without early cutoff (up to 14x on a single commit, where the mechanism actually bites), and 2.65x LLM calls without step memoization.",
+    "early_cutoffs_min": 100,
+    "cutoff_executed_ratio_min": 1.15,
+    "cutoff_executed_ratio_worst_commit_min": 10,
+    "memo_call_ratio_min": 2.0
+  },
+  "naive_cache_staleness": {
+    "_note": "The baselines must actually go stale, or the comparison proves nothing. Measured over 30 commits: 91 stale artifacts for the input-hash cache, 2 for the prompt-hash cache (the model-id commits).",
+    "input_hash_stale_events_min": 20,
+    "prompt_hash_stale_events_min": 1
+  },
+
+  "cas_tampering": { "cas_byte_flips_detected_pct_min": 100 },
+  "trace_tampering": { "trace_edits_detected_pct_min": 100 },
+  "cache_poisoning": {
+    "poisoned_entries_rejected_pct_min": 100,
+    "accepted_max": 0
+  },
+  "cycle_detection": { "cycles_detected_pct_min": 100 },
+  "build_semantics_sweep": {
+    "clean_equivalent_pct_min": 100,
+    "unnecessary_reruns_max": 0
+  }
+}
