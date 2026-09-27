@@ -169,6 +169,56 @@ def test_a_token_budget_stops_further_steps() -> None:
     assert result.stats.provider_calls == 1, "the first call cannot be known in advance, no more"
 
 
+def _fan_in_llm_program(n_leaves: int) -> Program:
+    """``n_leaves`` independent LLM nodes plus a root that needs them all at once."""
+    return Program(
+        n_files=1,
+        nodes=(
+            *(NodeSpec(reads=(0,), uses_llm=True) for _ in range(n_leaves)),
+            NodeSpec(reads=(0,), static_deps=tuple(range(n_leaves))),
+        ),
+    )
+
+
+@pytest.mark.parametrize("jobs", [1, 2, 4])
+def test_the_token_budget_is_overshot_by_at_most_the_calls_in_flight(jobs: int) -> None:
+    """The honest bound on the token and USD limits, which are only known after a call returns.
+
+    A step is reserved before the call; the tokens it will cost are not knowable until it comes
+    back. Every rule body already past that reservation therefore still reaches the provider, so
+    the limit can be crossed by as many calls as there are rule slots -- not by one, as the docs
+    used to say. The count comes from the provider itself because the abort cancels the tasks whose
+    calls are still in flight: those calls were made and billed, but never reported their usage.
+    This test is what keeps ``agentic/budget.py`` and ``docs/THREAT_MODEL.md`` D2 true.
+    """
+    import os
+
+    from incremental_agent_builds.engine.cas import MemoryContentStore
+    from incremental_agent_builds.engine.engine import BuildEngine, EngineConfig
+    from incremental_agent_builds.engine.store import TraceStore
+    from incremental_agent_builds.workload.synthetic import make_synthetic_provider, program_rules
+
+    leaves = 8
+    program = _fan_in_llm_program(leaves)
+    provider = make_synthetic_provider()
+    engine = BuildEngine(
+        rules=program_rules(program),
+        workspace=initial_workspace(program, [1]),
+        store=TraceStore(":memory:", mac_key=os.urandom(32)),
+        cas=MemoryContentStore(),
+        provider=provider,
+        config=EngineConfig(jobs=jobs, llm_concurrency=4),
+        # One token: the very first call that reports its usage crosses the limit.
+        default_budget=BudgetLimits.of(steps=100, tokens=1, usd=100.0),
+    )
+    result = engine.build_sync([Node(i=leaves)])
+
+    assert result.aborted is not None
+    assert "tokens" in result.aborted
+    assert result.stats.llm_steps <= leaves
+    assert 1 <= provider.calls <= jobs, f"{provider.calls} calls reached the provider"
+
+
 def test_a_ledger_refuses_to_raise_limits_on_resume(tmp_path: object) -> None:
     from pathlib import Path
 

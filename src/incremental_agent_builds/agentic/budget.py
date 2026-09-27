@@ -9,8 +9,12 @@ and reload the file before every change, so they draw from one budget instead of
 full amount. Counters never move backwards (a deleted or rolled-back file does not reset an open
 ledger) and the tightest limits seen by any instance win.
 
-Steps are checked before a call; tokens and cost can only be known afterwards, so a single call
-may overshoot, after which every further step is refused.
+Steps are checked before a call; tokens and cost can only be known afterwards. The token and
+USD limits can therefore be overshot by every call that was already past its reservation when one
+of them crossed the limit -- as many as the caller runs concurrently, which for a build is ``jobs``
+rule slots. Every step reserved after the crossing is refused. A call that the resulting abort
+cancels was still billed by the provider and never reports its usage here, so a persisted ledger
+can understate what an aborted run spent. docs/THREAT_MODEL.md D2 states both limits.
 """
 
 from __future__ import annotations
