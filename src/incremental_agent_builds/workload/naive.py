@@ -53,7 +53,7 @@ class NaivePipeline:
     provider: LLMProvider
     mode: CacheMode
     redact: bool = True
-    cache: dict[str, JsonValue] = field(default_factory=dict)
+    cache: dict[str, dict[str, JsonValue]] = field(default_factory=dict)
     provider_calls: int = 0
     tokens: int = 0
 
@@ -66,7 +66,8 @@ class NaivePipeline:
         model: str,
         schema: type[BaseModel],
         max_tokens: int,
-    ) -> JsonValue:
+    ) -> dict[str, JsonValue]:
+        """One cached LLM call. The result is an object because every schema here is one."""
         request = build_request(
             template_text=template,
             variables=variables,
@@ -80,13 +81,16 @@ class NaivePipeline:
         else:
             prompt = "".join(getattr(block, "text", "") for block in request.messages[-1].content)
             key = sha256_hex(f"{task}\x00{request.system}\x00{prompt}")
-        if key in self.cache:
-            return self.cache[key]
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
         response = self.provider.complete(request)
         self.provider_calls += 1
         self.tokens += response.usage.total_tokens
         payload = response.parsed if response.parsed is not None else json.loads(response.text)
-        value: JsonValue = schema.model_validate_json(json.dumps(payload)).model_dump(mode="json")
+        value: dict[str, JsonValue] = schema.model_validate_json(json.dumps(payload)).model_dump(
+            mode="json"
+        )
         self.cache[key] = value
         return value
 
@@ -125,7 +129,6 @@ class NaivePipeline:
                 ModuleSummaryOut,
                 800,
             )
-            assert isinstance(result, dict)  # noqa: S101 - schema output is an object
             value: JsonValue = {
                 "module": current["module"],
                 "path": path,
@@ -167,7 +170,10 @@ class NaivePipeline:
                 ReleaseNoteOut,
                 1200,
             )
-            assert isinstance(generated, dict)  # noqa: S101 - schema output is an object
-            note = {"title": generated["title"], "bullets": generated["bullets"], "generated": True}
+            note = {
+                "title": generated["title"],
+                "bullets": generated["bullets"],
+                "generated": True,
+            }
         artifacts["release"] = note
         return artifacts

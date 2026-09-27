@@ -148,7 +148,8 @@ def _class(rng: random.Random, module_name: str) -> ClassSpec:
 
 
 def generate_model(seed: int = 7, *, root: str = "pkg", name: str = "acme-toolkit") -> PackageModel:
-    rng = random.Random(seed)  # noqa: S311  # nosec B311 - reproducible fixtures, not crypto
+    # Reproducible fixtures, not cryptography: the same seed must give the same workspace.
+    rng = random.Random(seed)  # noqa: S311  # nosec B311
     modules: list[ModuleSpec] = []
     for sub, names in SUBPACKAGES.items():
         for module_name in names:

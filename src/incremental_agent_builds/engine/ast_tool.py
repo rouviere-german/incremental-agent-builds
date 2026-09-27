@@ -14,7 +14,10 @@ import contextlib
 import itertools
 import json
 import queue
-import subprocess
+
+# The subprocess is the whole point of this module: ast.parse on hostile input can exhaust the stack
+# or memory, so it runs in a child interpreter rather than in the build process.
+import subprocess  # nosec B404
 import sys
 import threading
 import weakref
@@ -77,7 +80,9 @@ class AstWorker:
         self.restarts = 0
 
     def _start(self) -> subprocess.Popen[bytes]:
-        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        # Fixed argv, no shell, and the command is either this module's own source under `python -I`
+        # or one a test supplies; untrusted source text is written to stdin, never to the argv.
+        process = subprocess.Popen(  # noqa: S603  # nosec B603
             self._command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

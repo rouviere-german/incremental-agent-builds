@@ -32,7 +32,7 @@ from incremental_agent_builds.engine.ast_tool import AstWorkerPool
 from incremental_agent_builds.engine.cas import FileContentStore
 from incremental_agent_builds.engine.effects import DocsSiteSink, publish_docs
 from incremental_agent_builds.engine.engine import EngineConfig
-from incremental_agent_builds.engine.errors import IntegrityError
+from incremental_agent_builds.engine.errors import EffectError, IntegrityError
 from incremental_agent_builds.engine.metrics import create_build_metrics
 from incremental_agent_builds.engine.oracle import compare_live
 from incremental_agent_builds.engine.plan import make_plan
@@ -147,7 +147,8 @@ def run_demo(workdir: Path, *, commits: int = DEMO_COMMITS) -> dict[str, JsonVal
             trust=TrustStore([signer.public_b64]),
         )
         cas = engine.cas
-        assert isinstance(cas, FileContentStore)  # noqa: S101 - file_engine always builds one
+        if not isinstance(cas, FileContentStore):  # pragma: no cover - file_engine builds one
+            raise TypeError("the demo needs an on-disk CAS to tamper with")
         naive = NaivePipeline(make_fake_provider(), "prompt-hash")
 
         _print("=" * 100)
@@ -332,7 +333,8 @@ def run_demo(workdir: Path, *, commits: int = DEMO_COMMITS) -> dict[str, JsonVal
             audit=audit,
         )
         _print(f"   first attempt: {blocked.status} (approval {blocked.approval_id})")
-        assert blocked.approval_id is not None  # noqa: S101 - the gate always opens a request
+        if blocked.approval_id is None:  # pragma: no cover - the gate always opens a request
+            raise EffectError("the publish gate did not open an approval request")
         approvals.decide(blocked.approval_id, approver="reviewer", approve=True)
         applied = publish_docs(
             build=build,

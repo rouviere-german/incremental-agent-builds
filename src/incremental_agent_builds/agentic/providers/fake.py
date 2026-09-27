@@ -110,7 +110,8 @@ class FakeProvider:
 
     def __init__(self, policy: Policy, *, seed: int = 0) -> None:
         self._policy = policy
-        self._rng = random.Random(seed)  # noqa: S311  # nosec B311 - simulation, not cryptography
+        # Simulation, not cryptography: the seed is what makes a fake run reproducible.
+        self._rng = random.Random(seed)  # noqa: S311  # nosec B311
         self._turn = 0
         self.request_hashes: list[str] = []
 

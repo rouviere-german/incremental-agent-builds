@@ -643,15 +643,17 @@ class BuildSession:
         key_id = key.key_id
         pending = self._regenerating.get(key_id)
         if pending is None:
-            pending = asyncio.get_running_loop().create_future()
-            pending.add_done_callback(_consume_exception)
-            self._regenerating[key_id] = pending
+            # Bound to a separate name so the closure below closes over a non-optional future:
+            # a narrowing assertion would be stripped by `python -O`.
+            future: asyncio.Future[JsonValue] = asyncio.get_running_loop().create_future()
+            future.add_done_callback(_consume_exception)
+            pending = future
+            self._regenerating[key_id] = future
             rule = self.engine.rules.rule_for(key)
 
             async def run() -> None:
                 from incremental_agent_builds.engine.context import BuildContext  # noqa: PLC0415
 
-                assert pending is not None  # noqa: S101 - narrowed for the closure
                 slot = _Slot(self._rule_slots)
                 await slot.acquire()
                 context = BuildContext(self, key, slot, recording=False)
@@ -667,10 +669,10 @@ class BuildSession:
                         )
                     self.stats.regenerated += 1
                     self.audit("value_regenerated", {"key": key_id, "result": digest})
-                    pending.set_result(value)
+                    future.set_result(value)
                 except BaseException as exc:
-                    if not pending.done():
-                        pending.set_exception(exc)
+                    if not future.done():
+                        future.set_exception(exc)
                     if isinstance(exc, asyncio.CancelledError):
                         raise
                 finally:
