@@ -33,12 +33,14 @@ __all__ = [
     "Counted",
     "Doubled",
     "Echo",
+    "Shout",
     "Sum",
     "Upper",
     "UpperOut",
     "counting_rules",
     "make_engine",
     "static_provider",
+    "step_rules",
     "upper_tool",
 ]
 
@@ -74,6 +76,18 @@ class Counted(BuildKey):
     """Returns ``value % modulus``, so re-executions often produce the same value."""
 
     modulus: int
+
+
+class Shout(BuildKey):
+    """One LLM step and one tool step, plus a config value that neither of them depends on.
+
+    The config value is what makes this key useful for step-level tests: editing it invalidates the
+    key's trace without changing either step fingerprint, so the rule re-runs and has to decide
+    whether it may reuse the recorded LLM output and tool result. It is read *after* both steps, so
+    verification walks past them before it finds the mismatch.
+    """
+
+    path: str
 
 
 class UpperOut(BaseModel):
@@ -163,6 +177,25 @@ def counting_rules() -> tuple[RuleSet, _Counts]:
         return number % key.modulus
 
     rules: tuple[Rule[Any], ...] = (echo, doubled, total, upper, counted)
+    return RuleSet(rules), counts
+
+
+def step_rules() -> tuple[RuleSet, _Counts]:
+    """A rule set whose single rule makes one LLM step and one tool step."""
+    counts = _Counts()
+
+    @rule(Shout)
+    async def shout(ctx: BuildContext, key: Shout) -> JsonValue:
+        counts.runs["shout"] += 1
+        text = await ctx.read(key.path) or ""
+        loud = await ctx.llm("shout", {"word": text}, model="fake-a", schema=UpperOut)
+        tooled = await ctx.tool("upper", {"path": key.path})
+        # Read last on purpose: verification then reaches the LLM and tool steps first, so a test
+        # that edits this value exercises both the verify-time and the execute-time step lookup.
+        await ctx.config("demo.factor")
+        return {"shouted": loud.shouted, "tool": tooled}
+
+    rules: tuple[Rule[Any], ...] = (shout,)
     return RuleSet(rules), counts
 
 

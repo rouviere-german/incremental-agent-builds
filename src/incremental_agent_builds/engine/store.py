@@ -1,4 +1,4 @@
-"""SQLite store for verifying traces, step records, imported constructive traces and runs.
+"""SQLite store for verifying traces, step records, imported shared-cache entries and runs.
 
 A *verifying trace* records, for one key, the ordered groups of dependencies the rule read during
 its last execution (each with the hash of the value it saw) and the hash of the result. Values
@@ -34,6 +34,7 @@ __all__ = [
     "Dep",
     "DepGroups",
     "DepKind",
+    "ImportedStep",
     "IntegrityEvent",
     "StepRecord",
     "Trace",
@@ -75,6 +76,14 @@ CREATE TABLE IF NOT EXISTS constructive (
     mac TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS constructive_key ON constructive (key_id);
+CREATE TABLE IF NOT EXISTS imported_steps (
+    fingerprint TEXT PRIMARY KEY,
+    body TEXT NOT NULL,
+    signer TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    imported_at REAL NOT NULL,
+    mac TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     run_id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at REAL NOT NULL,
@@ -91,7 +100,6 @@ class DepKind(StrEnum):
     CONFIG = "config"
     LLM = "llm"
     TOOL = "tool"
-
 
 @dataclass(frozen=True, slots=True)
 class Dep:
@@ -197,6 +205,38 @@ class StepRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ImportedStep:
+    """A signed LLM or tool step record that arrived in a shared-cache bundle.
+
+    Imported steps are kept apart from locally computed ones for two reasons. They must never be
+    re-exported under this store's signature, and -- like an imported constructive trace -- they are
+    only *candidates*: the exact body that was signed is stored verbatim so that a build can
+    re-verify the signature against the allowlist every time it wants to use one. Dropping a key
+    from the allowlist therefore revokes the LLM outputs and tool results it signed as well.
+    """
+
+    fingerprint: str
+    body: dict[str, Any]
+    signer: str
+    signature: str
+    imported_at: float
+
+    @property
+    def kind(self) -> str:
+        return str(self.body["step_kind"])
+
+    @property
+    def result_hash(self) -> str:
+        return str(self.body["result_hash"])
+
+    def as_step_record(self) -> StepRecord:
+        """The record a build may use, tagged with where it came from."""
+        meta = {str(k): v for k, v in dict(self.body["meta"]).items()}
+        meta["origin"] = f"imported:{self.signer}"
+        return StepRecord(self.fingerprint, self.kind, self.result_hash, meta, self.imported_at)
+
+
+@dataclass(frozen=True, slots=True)
 class ConstructiveEntry:
     """An imported, signature-verified constructive trace (key + dep hashes -> result)."""
 
@@ -229,6 +269,16 @@ class IntegrityEvent:
 def _mac(key: bytes, *parts: str) -> str:
     message = "\x1f".join(("iab-store-v1", *parts)).encode("utf-8")
     return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def _valid_step_body(body: Any) -> bool:
+    """Whether a stored imported-step body has the fields :class:`ImportedStep` reads."""
+    return (
+        isinstance(body, dict)
+        and isinstance(body.get("meta"), dict)
+        and isinstance(body.get("step_kind"), str)
+        and isinstance(body.get("result_hash"), str)
+    )
 
 
 def _trace_parts(trace: Trace, deps_text: str, usage_text: str) -> tuple[str, ...]:
@@ -468,6 +518,61 @@ class TraceStore:
                 continue
             entries.append(ConstructiveEntry(entry_id, row_key, body, signer, signature))
         return entries
+
+    # --- imported step records ----------------------------------------------------------------
+
+    def put_imported_steps(self, entries: Iterable[ImportedStep]) -> None:
+        rows = []
+        for entry in entries:
+            body = json.dumps(entry.body, sort_keys=True, separators=(",", ":"))
+            parts = ("imported_step", entry.fingerprint, body, entry.signer, entry.signature)
+            rows.append(
+                (
+                    entry.fingerprint,
+                    body,
+                    entry.signer,
+                    entry.signature,
+                    float(entry.imported_at),
+                    _mac(self._key, *parts),
+                )
+            )
+        if not rows:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO imported_steps (fingerprint, body, signer, signature, "
+                "imported_at, mac) VALUES (?,?,?,?,?,?)",
+                rows,
+            )
+            self._conn.commit()
+
+    def load_imported_steps(self) -> dict[str, ImportedStep]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT fingerprint, body, signer, signature, imported_at, mac FROM imported_steps"
+            ).fetchall()
+        entries: dict[str, ImportedStep] = {}
+        for fingerprint, body_text, signer, signature, imported_at, mac in rows:
+            parts = ("imported_step", fingerprint, body_text, signer, signature)
+            if not hmac.compare_digest(_mac(self._key, *parts), mac):
+                self._report("imported_steps", fingerprint, "MAC mismatch")
+                continue
+            try:
+                body = json.loads(body_text)
+            except json.JSONDecodeError:
+                body = None
+            if not _valid_step_body(body):
+                self._report("imported_steps", fingerprint, "malformed row")
+                continue
+            entries[fingerprint] = ImportedStep(
+                fingerprint, body, signer, signature, float(imported_at)
+            )
+        return entries
+
+    def imported_step_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM imported_steps").fetchone()
+        return int(row[0])
 
     def constructive_count(self) -> int:
         with self._lock:

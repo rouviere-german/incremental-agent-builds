@@ -389,6 +389,7 @@ class BuildService:
             "last_run": self.store.last_run_id(),
             "traces": len(self.store.load_traces()),
             "constructive_entries": self.store.constructive_count(),
+            "imported_steps": self.store.imported_step_count(),
             "trusted_signers": list(self.trust.key_ids),
             "audit_head": self.audit.head,
         }

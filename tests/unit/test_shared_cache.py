@@ -34,10 +34,13 @@ from incremental_agent_builds.engine.signing import SigningKey, TrustStore
 from incremental_agent_builds.engine.store import TraceStore
 from incremental_agent_builds.engine.tools import BuildToolRegistry
 from tests.engine_helpers import (
+    CONFIG_TEXT,
     Doubled,
+    Shout,
     Upper,
     counting_rules,
     make_engine,
+    step_rules,
     upper_tool,
     workspace_with,
 )
@@ -317,3 +320,128 @@ def test_an_import_report_serializes_its_counts() -> None:
     assert payload["accepted_traces"] == 0
     assert payload["rejected"] == {"untrusted_signer": report.rejected_total}
     assert len(text(payload["bundle_sha256"])) == 64
+
+
+# --- imported step records ----------------------------------------------------------------------
+#
+# A bundle carries the LLM outputs and tool results the exported traces rely on. Those are foreign
+# data too: a peer chose the model output this store would otherwise have paid a provider for. The
+# tests below pin down that an imported step is a *candidate* exactly like an imported trace, so the
+# allowlist governs it at every use, not only at the moment of import.
+
+
+def _step_producer() -> tuple[BuildEngine, Any]:
+    rules, counts = step_rules()
+    engine = make_engine(workspace_with(), rules)
+    engine.build_sync([Shout(path="in/a.txt")]).raise_for_failures()
+    return engine, counts
+
+
+def _peer_with_imported_steps(
+    signer: SigningKey, *, trust_at_import: TrustStore
+) -> tuple[TraceStore, MemoryContentStore, Any]:
+    producer, _ = _step_producer()
+    peer_store, peer_cas = _fresh_store(), MemoryContentStore()
+    report = import_bundle(
+        _raw(export_bundle(producer.store, producer.cas, signer)),
+        store=peer_store,
+        cas=peer_cas,
+        trust=trust_at_import,
+    )
+    assert report.accepted_steps == 2, "one LLM step and one tool step travelled in the bundle"
+    return peer_store, peer_cas, report
+
+
+def _edited_config_workspace() -> Any:
+    """The producer's workspace with only ``demo.factor`` changed.
+
+    That invalidates the key's trace (it read the value) while leaving the LLM and tool fingerprints
+    identical, so the rule re-runs and the imported step records are what it may or may not reuse.
+    """
+    return workspace_with({"iab.toml": CONFIG_TEXT.replace("factor = 2", "factor = 3")})
+
+
+def test_an_imported_step_is_reused_while_its_signer_is_trusted() -> None:
+    signer = SigningKey.generate()
+    trust = TrustStore([signer.public_b64])
+    peer_store, peer_cas, _ = _peer_with_imported_steps(signer, trust_at_import=trust)
+
+    rules, counts = step_rules()
+    peer = make_engine(
+        _edited_config_workspace(), rules, store=peer_store, cas=peer_cas, trust=trust
+    )
+    result = peer.build_sync([Shout(path="in/a.txt")])
+
+    assert result.ok
+    assert result.stats.imported == 0, "the trace does not apply: the config value changed"
+    assert counts.runs["shout"] == 1, "the rule body ran"
+    assert result.stats.llm_memo_hits == 1, "the imported LLM output was reused"
+    assert result.stats.provider_calls == 0
+    assert result.stats.tool_memo_hits == 1, "the imported tool result was reused"
+    assert result.stats.tool_runs == 0
+
+
+def test_revoking_a_signer_stops_its_imported_steps_being_used() -> None:
+    """An imported LLM output or tool result is re-checked against the allowlist at every use.
+
+    Without this, dropping a key would revoke its traces but leave the step records it signed in
+    place, and a revoked peer's chosen model output would still be served for as long as the store
+    lived.
+    """
+    signer = SigningKey.generate()
+    peer_store, peer_cas, _ = _peer_with_imported_steps(
+        signer, trust_at_import=TrustStore([signer.public_b64])
+    )
+
+    rules, counts = step_rules()
+    revoked = make_engine(
+        _edited_config_workspace(),
+        rules,
+        store=peer_store,
+        cas=peer_cas,
+        trust=TrustStore([SigningKey.generate().public_b64]),
+    )
+    result = revoked.build_sync([Shout(path="in/a.txt")])
+
+    assert result.ok
+    assert result.stats.imported == 0
+    assert counts.runs["shout"] == 1
+    assert result.stats.llm_memo_hits == 0, "the revoked peer's model output must not be served"
+    assert result.stats.provider_calls == 1, "the local provider had to be called"
+    assert result.stats.tool_memo_hits == 0, "the revoked peer's tool result must not be served"
+    assert result.stats.tool_runs == 1
+
+
+def test_an_edited_imported_step_row_is_treated_as_absent() -> None:
+    """The row MAC covers the signed body, so editing the result hash in place does not stick."""
+    signer = SigningKey.generate()
+    trust = TrustStore([signer.public_b64])
+    peer_store, peer_cas, _ = _peer_with_imported_steps(signer, trust_at_import=trust)
+    peer_store.raw_execute("UPDATE imported_steps SET body = REPLACE(body, 'step', 'STEP') WHERE 1")
+
+    rules, counts = step_rules()
+    peer = make_engine(
+        _edited_config_workspace(), rules, store=peer_store, cas=peer_cas, trust=trust
+    )
+    result = peer.build_sync([Shout(path="in/a.txt")])
+
+    assert result.ok
+    assert counts.runs["shout"] == 1
+    assert result.stats.llm_memo_hits == 0
+    assert result.stats.provider_calls == 1
+    assert result.stats.integrity_events >= 1
+
+
+def test_imported_steps_are_never_re_exported() -> None:
+    """A store must not put its own signature on a step record it merely imported."""
+    signer = SigningKey.generate()
+    trust = TrustStore([signer.public_b64])
+    peer_store, peer_cas, _ = _peer_with_imported_steps(signer, trust_at_import=trust)
+    rules, _ = step_rules()
+    peer = make_engine(
+        _edited_config_workspace(), rules, store=peer_store, cas=peer_cas, trust=trust
+    )
+    peer.build_sync([Shout(path="in/a.txt")]).raise_for_failures()
+
+    re_export = export_bundle(peer_store, peer_cas, SigningKey.generate())
+    assert _entries(re_export, "step") == [], "imported step records are not re-signed"

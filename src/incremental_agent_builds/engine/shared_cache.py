@@ -8,12 +8,16 @@ hash, together with the LLM/tool step records those traces rely on and the value
 Every entry is Ed25519-signed by the exporting store. On import, an entry is accepted only if:
 its signer is on the local allowlist, the signature verifies over the canonical entry, the value
 blob it names is in the bundle and hashes to the claimed result, and the blob is canonical JSON.
-Accepted trace entries are *candidates*: a build uses one only after checking every recorded
-dependency against its own current values, exactly like a verifying trace, and re-verifies the
-signature against the allowlist at that moment (so revoking a key also revokes its entries).
+Accepted entries -- traces *and* step records -- are only *candidates*. A build uses a trace only
+after checking every recorded dependency against its own current values, exactly like a verifying
+trace, and it re-verifies the signature of any imported trace or step record against the allowlist
+at the moment it wants to use it. Removing a key from the allowlist therefore revokes both the
+results and the LLM outputs and tool results it signed.
 
-Only traces this store computed itself (``origin == "executed"``) are exported, so a store never
-re-signs results it merely imported. Volatile tool steps are never exported.
+Only traces and steps this store computed itself are exported (traces with
+``origin == "executed"``; steps from the local ``steps`` table, never the imported ones), so a store
+never re-signs anything it merely imported. Volatile tool steps are never exported, and neither is a
+trace whose recorded context call raised, since such a trace can never verify anywhere.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from incremental_agent_builds.engine.signing import SigningKey, TrustStore
 from incremental_agent_builds.engine.store import (
     ConstructiveEntry,
     DepKind,
+    ImportedStep,
     StepRecord,
     Trace,
     TraceStore,
@@ -230,7 +235,7 @@ def import_bundle(
         raise CacheImportError(f"not a {BUNDLE_FORMAT} v1 document") from exc
     report = ImportReport(bundle_sha256=sha256_hex(raw))
     accepted_traces: list[ConstructiveEntry] = []
-    accepted_steps: list[StepRecord] = []
+    accepted_steps: list[ImportedStep] = []
     local_steps = store.load_steps()
 
     def reject(reason: RejectReason) -> None:
@@ -269,13 +274,13 @@ def import_bundle(
         else:
             fingerprint = str(body["fingerprint"])
             if fingerprint in local_steps:
-                continue  # never overwrite a locally recorded step
-            meta = dict(body["meta"]) if isinstance(body["meta"], dict) else {}
-            meta["origin"] = f"imported:{entry.signer}"
+                continue  # a locally computed step is always preferred over a foreign one
+            # The body is stored exactly as it was signed, so the signature can be checked again
+            # every time a build wants to use this step (see ``BuildSession.step``).
             accepted_steps.append(
-                StepRecord(fingerprint, str(body["step_kind"]), result_hash, meta, clock_now)
+                ImportedStep(fingerprint, dict(body), entry.signer, entry.signature, clock_now)
             )
     report.accepted_traces = store.put_constructive(accepted_traces)
-    store.put_steps(accepted_steps)
+    store.put_imported_steps(accepted_steps)
     report.accepted_steps = len(accepted_steps)
     return report

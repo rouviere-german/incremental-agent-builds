@@ -51,7 +51,14 @@ from incremental_agent_builds.engine.errors import (
 from incremental_agent_builds.engine.hashing import MISSING, value_hash
 from incremental_agent_builds.engine.keys import BuildKey
 from incremental_agent_builds.engine.rules import Rule
-from incremental_agent_builds.engine.store import Dep, DepGroups, DepKind, StepRecord, Trace
+from incremental_agent_builds.engine.store import (
+    Dep,
+    DepGroups,
+    DepKind,
+    ImportedStep,
+    StepRecord,
+    Trace,
+)
 
 if TYPE_CHECKING:
     from incremental_agent_builds.engine.engine import BuildEngine
@@ -164,9 +171,13 @@ class BuildSession:
         self.cycles: list[tuple[str, ...]] = []
         self.executed_keys: list[str] = []
         self.abort_error: BuildAbortedError | None = None
+        # Captured before the loads below, so a row this session finds unreadable is counted and
+        # audited by the build that hit it (events already in the list belong to earlier sessions).
+        self._integrity_reported = len(engine.store.integrity_events)
         self._old_traces = engine.store.load_traces()
         self._old_steps = engine.store.load_steps()
-        self._integrity_reported = len(engine.store.integrity_events)
+        self._imported_steps: dict[str, ImportedStep] = engine.store.load_imported_steps()
+        self._verified_imports: dict[str, StepRecord | None] = {}
         self._new_traces: dict[str, Trace] = {}
         self._new_steps: dict[str, StepRecord] = {}
         self._futures: dict[str, asyncio.Future[KeyResult]] = {}
@@ -192,7 +203,38 @@ class BuildSession:
         return self._old_traces.get(key_id)
 
     def step(self, fingerprint: str) -> StepRecord | None:
-        return self._new_steps.get(fingerprint) or self._old_steps.get(fingerprint)
+        """The memoized LLM output or tool result for ``fingerprint``, if one may be used."""
+        local = self._new_steps.get(fingerprint) or self._old_steps.get(fingerprint)
+        if local is not None:
+            return local
+        return self._imported_step(fingerprint)
+
+    def _imported_step(self, fingerprint: str) -> StepRecord | None:
+        """A step record from a shared-cache bundle, but only while its signer is still trusted.
+
+        An imported LLM output or tool result is foreign data: a peer chose the value this store
+        would otherwise have paid a provider for. Like an imported constructive trace it is only a
+        candidate, so its Ed25519 signature is re-checked here, against the allowlist as it is
+        *now*, every build. That is what makes dropping a key a retroactive revocation of its step
+        records and not only of its traces. The answer is cached per session because the allowlist
+        cannot change while a build runs.
+        """
+        if fingerprint in self._verified_imports:
+            return self._verified_imports[fingerprint]
+        entry = self._imported_steps.get(fingerprint)
+        record: StepRecord | None = None
+        if entry is not None:
+            trust = self.engine.trust
+            if trust is not None and trust.verify(entry.signer, entry.body, entry.signature):
+                record = entry.as_step_record()
+            else:
+                self.engine.metrics.cache_import_rejections_total.labels("untrusted_at_use").inc()
+                self.audit(
+                    "imported_step_rejected",
+                    {"fingerprint": fingerprint, "signer": entry.signer},
+                )
+        self._verified_imports[fingerprint] = record
+        return record
 
     def record_step(self, step: StepRecord) -> None:
         self._new_steps[step.fingerprint] = step
