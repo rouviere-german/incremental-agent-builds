@@ -29,12 +29,22 @@ RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home --home-dir /nonexistent \
        --shell /usr/sbin/nologin app
 COPY --from=builder /opt/venv /opt/venv
+# The service needs somewhere to write: the SQLite trace store, the CAS, the audit log, the approval
+# file and the generated site. The root filesystem is read-only in production (see
+# docker-compose.yml), so all of it lives under one directory that is mounted as a volume. It is
+# created here owned by the runtime user, so the image also starts without a volume for a smoke test.
+RUN mkdir -p /var/lib/iab/workspace /var/lib/iab/store /var/lib/iab/data \
+    && chown -R 10001:10001 /var/lib/iab
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_HOST=0.0.0.0 \
-    APP_PORT=8000
+    APP_PORT=8000 \
+    APP_WORKSPACE_DIR=/var/lib/iab/workspace \
+    APP_STORE_DIR=/var/lib/iab/store \
+    APP_DATA_DIR=/var/lib/iab/data
 WORKDIR /app
+VOLUME ["/var/lib/iab"]
 USER 10001:10001
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
