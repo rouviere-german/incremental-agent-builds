@@ -1,0 +1,83 @@
+{
+  "machine": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "python": "3.12.14",
+    "cpu_count": 6,
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "results": {
+    "noop_rebuild_1000_rules": {
+      "runs": 7.0,
+      "p50_us": 274714.7,
+      "p95_us": 282992.6,
+      "rules": 1000.0,
+      "p95_ms": 282.99
+    },
+    "cold_build_1000_rules": {
+      "runs": 3.0,
+      "p50_us": 455958.1,
+      "p95_us": 481750.2,
+      "p95_ms": 481.75
+    },
+    "plan_1000_rules": {
+      "runs": 7.0,
+      "p50_us": 85682.5,
+      "p95_us": 107628.0,
+      "p95_ms": 107.63
+    },
+    "trace_store_load_1000_rows": {
+      "runs": 7.0,
+      "p50_us": 36796.5,
+      "p95_us": 48749.0,
+      "rows": 1000.0,
+      "p95_ms": 48.75
+    },
+    "value_hash_40_symbols": {
+      "runs": 5000.0,
+      "p50_us": 59.8,
+      "p95_us": 94.0
+    },
+    "cas_get_json_4kb": {
+      "runs": 500.0,
+      "p50_us": 218.0,
+      "p95_us": 349.2
+    },
+    "llm_step_fingerprint": {
+      "runs": 5000.0,
+      "p50_us": 18.4,
+      "p95_us": 22.3
+    },
+    "redact_text_1kb": {
+      "runs": 2000.0,
+      "p50_us": 345.6,
+      "p95_us": 520.6
+    },
+    "rate_limiter_check": {
+      "runs": 20000.0,
+      "p50_us": 1.9,
+      "p95_us": 2.1
+    },
+    "llm_request_sha256_10_messages": {
+      "runs": 2000.0,
+      "p50_us": 106.0,
+      "p95_us": 130.6
+    },
+    "audit_append_fsync": {
+      "runs": 200.0,
+      "p50_us": 10960.6,
+      "p95_us": 12670.2
+    },
+    "audit_append_many_200": {
+      "runs": 20.0,
+      "p50_us": 25107.5,
+      "p95_us": 27024.2,
+      "entries_per_call": 200.0
+    },
+    "audit_verify_1000_entries": {
+      "runs": 10.0,
+      "p50_us": 36164.8,
+      "p95_us": 39116.2,
+      "p95_ms": 39.12
+    }
+  }
+}

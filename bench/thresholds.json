@@ -3,7 +3,7 @@
     "_note": "Regression thresholds enforced by `python tasks.py bench` and by CI. A metric ending in _min is a floor (must stay above), anything else is a limit (must stay below). Keys starting with _ are documentation and are not compared. Timing limits are set to roughly 3-4x the values measured on the machine recorded in bench/results/*.json, because shared CI runners are slower and noisy: they catch order-of-magnitude regressions, not drift. Correctness floors are exact (100%, 0) because anything else is a defect."
   },
   "noop_rebuild_1000_rules": {
-    "_note": "The spec's target is a no-op rebuild of 1k rules under 500 ms; repeated local runs measure 310-325 ms p95. The CI limit is looser so a slow shared runner does not fail the build; the README reports the measured number.",
+    "_note": "The spec's target is a no-op rebuild of 1k rules under 500 ms; three consecutive local runs measure 273-284 ms p95, and this row moves with machine load. The CI limit is looser so a slow shared runner does not fail the build; the README reports the measured number and its spread.",
     "p95_ms": 1200
   },
   "plan_1000_rules": { "p95_ms": 600 },

@@ -160,7 +160,9 @@ and the baseline check. `tasks.py` and the `Makefile` are equivalent; `tasks.py`
 ## Results
 
 All numbers below come from the benchmark scripts in `bench/`, run on the machine named in each
-table. Nothing here is estimated. `bench/results/*.json` holds the raw output.
+table. Nothing here is estimated. One snapshot per bench script is committed under
+`bench/results/`, with the machine that produced it; `uv run python tasks.py bench` regenerates them and
+CI uploads them as the `bench-results` and `savings-replay` artifacts.
 
 **Reference workload.** A generated 80-module Python package (four derived rules per module, three of
 them LLM-backed) plus a scripted 30-commit history covering whitespace-only edits, comment edits,
@@ -170,7 +172,7 @@ module rename, two new modules, two prompt-template edits and two model-id chang
 ### Savings over the 30-commit replay
 
 `uv run python bench/bench_savings.py --commits 30` — Windows 10, Intel i7-8750H (6 cores), Python
-3.12.14, 4 jobs. Cold build: 287 rules, 81 LLM calls, 61,692 tokens, 1.8 s.
+3.12.14, 4 jobs. Cold build: 287 rules, 81 LLM calls, 61,692 tokens, 2.0 s.
 
 | Metric | This system | Clean rebuild every commit | Saved |
 |---|---:|---:|---:|
@@ -238,22 +240,29 @@ is diluted because most commits touch little — the per-commit maximum is where
 
 `uv run python bench/bench_baseline.py` — same machine.
 
-| Benchmark | p50 | p95 |
-|---|---:|---:|
-| **No-op rebuild, 1,000 rules** | 293 ms | **310 ms** |
-| Cold build, 1,000 rules | 452 ms | 507 ms |
-| Plan (dirty set + cost), 1,000 rules | 75.5 ms | 99.3 ms |
-| Load + authenticate 1,000 trace rows | 33.6 ms | 51.3 ms |
-| LLM step fingerprint | 18.4 µs | 22.9 µs |
-| CAS verified read, 4 KB | 208 µs | 295 µs |
-| Audit append, batched (200 entries, one fsync) | 22.3 ms | 23.5 ms |
-| Audit chain verify, 1,000 entries | 34.4 ms | 36.3 ms |
+The last column is the p95 spread over three consecutive runs, because the rows that touch the disk
+move with whatever else the machine is doing. The p50/p95 columns are one run — the one in
+`bench/results/baseline.json`.
 
-The no-op rebuild target from the spec was <500 ms for 1,000 rules; measured 310 ms p95 (repeated
-runs on this machine land between 310 and 325 ms). CI enforces 1,200 ms for this row, because shared
-runners are slower and noisier than this laptop — the threshold is a regression guard, not the claim.
-Every threshold and where it came from is in `bench/thresholds.json`; [CLAIMS.md](CLAIMS.md) maps each
-statement above to the test, bench or CI job that backs it.
+| Benchmark | p50 | p95 | p95 over 3 runs |
+|---|---:|---:|---:|
+| **No-op rebuild, 1,000 rules** | 275 ms | **283 ms** | 273–284 ms |
+| Cold build, 1,000 rules | 456 ms | 482 ms | 417–482 ms |
+| Plan (dirty set + cost), 1,000 rules | 85.7 ms | 108 ms | 90.8–115 ms |
+| Load + authenticate 1,000 trace rows | 36.8 ms | 48.7 ms | 44.8–48.7 ms |
+| LLM step fingerprint | 18.4 µs | 22.3 µs | 20.6–27.8 µs |
+| CAS verified read, 4 KB | 218 µs | 349 µs | 273–349 µs |
+| Audit append, batched (200 entries, one fsync + one anchor write) | 25.1 ms | 27.0 ms | 27.0–28.2 ms |
+| Audit chain verify, 1,000 entries | 36.2 ms | 39.1 ms | 39.1–49.7 ms |
+
+The no-op rebuild target from the spec was <500 ms for 1,000 rules; measured 283 ms p95, 273–284 ms
+over three runs. The four disk-touching rows (both builds, the trace-store load and the two audit
+rows) are load-sensitive: they move by tens of percent when the machine is busy, and a number taken
+while the test suite is running is not comparable to one taken on an idle laptop. That is why CI
+enforces 1,200 ms for the no-op rebuild rather than the measured value — the thresholds are
+order-of-magnitude regression guards, not the claim. Every threshold and where it came from is in
+`bench/thresholds.json`; [CLAIMS.md](CLAIMS.md) maps each statement above to the test, bench or CI job
+that backs it.
 
 Loading and authenticating the trace rows is about a sixth of the no-op rebuild, and it is the floor:
 every build pays it before it can decide that there is nothing to do.
@@ -281,8 +290,9 @@ written by someone hostile, and that the model may be talked into anything.
   to the same thing. Every trace and step row carries an HMAC over its exact stored text, so an
   edited row is treated as absent rather than trusted.
 - **Signed sharing.** Shared-cache entries are Ed25519-signed and only accepted from an allowlisted
-  key. The signature is re-checked when an entry is *used*, so removing a key revokes its entries
-  retroactively. A store never re-exports a result it merely imported.
+  key. The signature is re-checked when an entry is *used* — for imported traces *and* for the LLM
+  outputs and tool results that travelled with them — so removing a key revokes retroactively
+  everything it signed. A store never re-exports, or re-signs, anything it merely imported.
 - **Jailed reads and a contained parser.** Paths are validated and resolved with `realpath`; a symlink
   out of the workspace is refused and invisible to globs. Untrusted Python is parsed in a separate
   `python -I` process with a timeout and an output cap.
@@ -291,10 +301,17 @@ written by someone hostile, and that the model may be talked into anything.
   honest mistakes, not a sandbox — [docs/adr/0004](docs/adr/0004-hermeticity-guard-not-sandbox.md)
   says what it cannot see.
 - **Hash-chained audit.** Executions, cache hits, imports, approvals and effects are appended to a
-  hash-chained log with a `verify` command.
+  hash-chained log with a `verify` command. Dropping the tail of a hash chain leaves a valid shorter
+  chain, so the head is recorded in a sidecar file on every append and checked by default — both by
+  `iab audit verify` and by reopening the log. An operator who keeps a copy of the head somewhere the
+  writer cannot reach passes it as `--expect-head`; that is the only version of this control that
+  survives an attacker with write access to both files.
 - **Scoped API.** `build:run`, `build:approve` and `cache:import` are separate; HS256 tokens are
   verified with a pinned algorithm and required `exp`/`iat`/`nbf`/`iss`/`aud`/`sub`, and the routes
-  fail closed (503) when no secret is configured.
+  fail closed (503) when no secret is configured. Rate-limit buckets are per token subject, then per
+  API key, then per client address (/64 for IPv6): the limiter verifies the bearer token itself,
+  because route dependencies run after ASGI middleware and the routes that spend money are the ones
+  behind a token.
 
 Reuse is observable rather than only benchmarkable: `/metrics` separates rules executed (by rule),
 reused and cut off, tokens not spent again, and cache-import rejections by reason, and each rule gets
@@ -323,7 +340,16 @@ a span carrying its outcome, the reason it ran and its dependency counts per kin
   docs/SEMANTICS.md for the contract.
 - **The LLM is treated as deterministic per request.** That is exact for `FakeProvider` and an
   assumption for a real model: the engine stores the first answer and reuses it. It never re-asks to
-  check, and it is not a consistency framework for non-deterministic tools.
+  check, and it is not a consistency framework for non-deterministic tools. There is no n-sample
+  agreement study and no re-ask-a-fraction-of-reused-steps mode that would bound how much that
+  assumption costs; `docs/SEMANTICS.md` states the assumption, and nothing here measures it.
+- **Budgets are checked before a call and charged after it.** The token and USD limits can therefore be
+  crossed by every call already past its reservation — up to `jobs` of them — and a call the resulting
+  abort cancels is billed by the provider without reaching the ledger. The step limit is the only one
+  enforced strictly before spending.
+- **Volatile tools are implemented but not exercised by the measured workload.** TTL expiry, refresh
+  and cutoff-on-unchanged are unit-tested; the 80-module reference workload registers only the
+  deterministic `ast_outline` tool, so no number in the table above depends on a volatile step.
 - **Not a general-purpose build tool.** There is no file-output model, no sandboxed command execution
   and no remote cache protocol. It builds JSON values from tracked inputs.
 - **No UI.** A CLI and a JSON HTTP API; the "docs site" the demo publishes is a directory of Markdown.

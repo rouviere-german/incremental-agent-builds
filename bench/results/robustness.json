@@ -1,0 +1,41 @@
+{
+  "machine": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "python": "3.12.14",
+    "cpu_count": 6,
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel"
+  },
+  "results": {
+    "cas_tampering": {
+      "samples": 200.0,
+      "detected": 200.0,
+      "cas_byte_flips_detected_pct_min": 100.0
+    },
+    "trace_tampering": {
+      "samples": 200.0,
+      "detected": 200.0,
+      "trace_edits_detected_pct_min": 100.0
+    },
+    "cache_poisoning": {
+      "samples": 200.0,
+      "accepted_max": 0.0,
+      "poisoned_entries_rejected_pct_min": 100.0,
+      "rejected_unsigned": 40.0,
+      "rejected_forged_body": 40.0,
+      "rejected_foreign_signer": 40.0,
+      "rejected_resigned_claim": 40.0,
+      "rejected_blob_mismatch": 40.0
+    },
+    "cycle_detection": {
+      "samples": 60.0,
+      "detected": 60.0,
+      "cycles_detected_pct_min": 100.0
+    },
+    "build_semantics_sweep": {
+      "cases": 60.0,
+      "builds": 310.0,
+      "clean_equivalent_pct_min": 100.0,
+      "unnecessary_reruns_max": 0.0
+    }
+  }
+}

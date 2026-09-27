@@ -4,8 +4,9 @@ Every claim this repository makes, and the test, benchmark or CI job that backs 
 `scripts/check_baseline.py` verifies that each backticked reference resolves to a real test function,
 file or CI job, so a claim whose evidence is deleted fails the build.
 
-Numbers come from `bench/` runs on Windows 10, Intel i7-8750H (6 cores), Python 3.12.14, recorded in
-`bench/results/*.json` with the machine that produced them. They are not estimates.
+Numbers come from `bench/` runs on Windows 10, Intel i7-8750H (6 cores), Python 3.12.14. One snapshot
+per bench script is committed under `bench/results/`, each carrying the machine that produced it, and
+`uv run python tasks.py bench` regenerates them. They are not estimates.
 
 ## The primary pattern: incremental rebuilds that match a clean build
 
@@ -56,11 +57,11 @@ Numbers come from `bench/` runs on Windows 10, Intel i7-8750H (6 cores), Python 
 
 | Claim | Evidence | Notes |
 |---|---|---|
-| A no-op rebuild of 1,000 rules takes 310 ms p95 (spec target: under 500 ms) | `bench/bench_baseline.py`, `.github/workflows/ci.yml#bench` | Repeated runs land between 310 and 325 ms. CI enforces 1,200 ms for shared-runner noise; `bench/thresholds.json` explains why |
+| A no-op rebuild of 1,000 rules takes 283 ms p95 (spec target: under 500 ms) | `bench/bench_baseline.py`, `.github/workflows/ci.yml#bench` | 273–284 ms p95 over three consecutive runs on an idle laptop; this row is load-sensitive. CI enforces 1,200 ms for shared-runner noise; `bench/thresholds.json` explains why |
 | Planning 1,000 rules takes 99 ms p95 | `bench/bench_baseline.py` | |
 | Loading and authenticating 1,000 trace rows takes 51 ms p95 | `bench/bench_baseline.py` | The floor cost of any build |
 | An LLM step fingerprint costs 23 µs p95 | `bench/bench_baseline.py` | |
-| Batched audit appends keep one fsync for a whole build's entries | `bench/bench_baseline.py` (`audit_append_many_200`) | 200 entries in 23.5 ms p95, versus 8.5 ms each appended individually |
+| Batched audit appends keep one fsync for a whole build's entries | `bench/bench_baseline.py` (`audit_append_many_200`) | 200 entries in 27.0 ms p95, versus 12.7 ms each appended individually (`audit_append_fsync`) |
 
 ## LLM steps
 
@@ -87,8 +88,9 @@ Numbers come from `bench/` runs on Windows 10, Intel i7-8750H (6 cores), Python 
 | Every trace and step row is MAC-authenticated; an edited or moved row is treated as absent | `tests/property/test_tamper.py::test_editing_any_trace_column_fails_the_mac`, `tests/property/test_tamper.py::test_a_trace_row_copied_to_another_key_fails_the_mac`, `bench/bench_robustness.py` | 200/200 in the bench |
 | Shared-cache entries must carry a valid Ed25519 signature from an allowlisted key | `tests/property/test_tamper.py::test_unsigned_and_untrusted_entries_are_rejected`, `tests/property/test_tamper.py::test_editing_a_signed_cache_entry_breaks_its_signature`, `bench/bench_robustness.py` | 200/200 rejected across five attack shapes, 0 accepted |
 | An imported entry is re-verified against local inputs before use | `tests/unit/test_shared_cache.py::test_an_imported_entry_is_not_used_when_a_dependency_differs` | |
-| Removing a key from the allowlist revokes its already-imported entries | `tests/unit/test_shared_cache.py::test_revoking_a_signer_stops_its_entries_being_used` | |
-| A store never re-exports results it imported | `tests/unit/test_shared_cache.py::test_only_locally_executed_traces_are_re_exported` | |
+| An imported step record is re-verified at use, not only at import | `tests/unit/test_shared_cache.py::test_an_imported_step_is_reused_while_its_signer_is_trusted`, `tests/unit/test_shared_cache.py::test_an_edited_imported_step_row_is_treated_as_absent` | Imported steps live in their own MAC'd table holding the exact signed body |
+| Removing a key from the allowlist revokes its already-imported entries — traces and the LLM/tool step records that came with them | `tests/unit/test_shared_cache.py::test_revoking_a_signer_stops_its_entries_being_used`, `tests/unit/test_shared_cache.py::test_revoking_a_signer_stops_its_imported_steps_being_used` | The signature is verified again at every use; an imported step is kept with the exact body that was signed |
+| A store never re-exports results it imported | `tests/unit/test_shared_cache.py::test_only_locally_executed_traces_are_re_exported`, `tests/unit/test_shared_cache.py::test_imported_steps_are_never_re_exported` | Neither traces nor step records |
 | A volatile tool step is never shared | `tests/unit/test_shared_cache.py::test_a_volatile_tool_step_is_never_exported` | |
 | One bad entry does not reject a whole bundle | `tests/unit/test_shared_cache.py::test_a_malformed_entry_body_is_rejected_individually` | |
 | Signatures are domain-separated, so one made for another purpose never verifies | `tests/unit/test_signing.py::test_the_signed_bytes_carry_a_domain_prefix` | |
@@ -164,17 +166,22 @@ Numbers come from `bench/` runs on Windows 10, Intel i7-8750H (6 cores), Python 
 | A model-id commit changes only the config file; a template commit only that template | `tests/unit/test_workload.py::test_a_model_id_commit_changes_only_the_config`, `tests/unit/test_workload.py::test_a_template_commit_changes_only_that_template` | |
 | Derived rules ignore what should not reach their dependents | `tests/unit/test_workload.py::test_module_api_drops_docstrings_so_doc_edits_do_not_reach_the_release_note`, `tests/unit/test_ast_tool.py::test_comments_and_layout_do_not_change_the_outline` | |
 
+| A rule that catches a failed `ctx` call cannot cache the degraded value | `tests/unit/test_failed_context_calls.py::test_a_degraded_llm_result_is_not_reused_once_the_provider_recovers`, `tests/unit/test_failed_context_calls.py::test_a_degraded_tool_result_is_not_reused_once_the_tool_recovers`, `tests/unit/test_failed_context_calls.py::test_a_swallowed_dependency_failure_is_not_reused_once_the_dependency_recovers` | The failed call is recorded with a sentinel hash no value can equal, so the key re-runs until it succeeds |
+| The token budget is overshot by at most the calls already in flight | `tests/unit/test_oracle_and_budgets.py::test_the_token_budget_is_overshot_by_at_most_the_calls_in_flight` | Measured at 1, 2 and 4 rule slots; the bound is `jobs`, not one call |
+| Rate-limit buckets are per authenticated caller, not per source address | `tests/unit/test_middleware.py::test_two_token_subjects_from_one_address_get_independent_buckets`, `tests/unit/test_middleware.py::test_an_invalid_token_shares_the_address_bucket` | A fresh token for the same subject does not mint a fresh bucket |
+| Tail truncation of the audit log is detected without an operator-supplied head | `tests/unit/test_audit.py::test_tail_truncation_is_caught_by_the_stored_head_anchor`, `tests/unit/test_audit.py::test_a_truncated_log_cannot_be_reopened_and_extended` | The sidecar anchor; deleting it restores the old blind spot, which `tests/unit/test_audit.py::test_deleting_the_anchor_leaves_truncation_undetectable` states |
+
 ## Engineering baseline
 
 | Claim | Evidence | Notes |
 |---|---|---|
 | ruff lint and format are clean | `.github/workflows/ci.yml#lint` | |
 | mypy `--strict` is clean over src, tests, scripts, bench and tasks.py | `.github/workflows/ci.yml#typecheck` | |
-| Test coverage is at or above 85% | `.github/workflows/ci.yml#test` | `fail_under = 85` in pyproject.toml; measured 94.86% branch coverage over 801 tests |
+| Test coverage is at or above 85% | `.github/workflows/ci.yml#test` | `fail_under = 85` in pyproject.toml; measured 95.40% branch coverage over 867 tests (`uv run python tasks.py test`) |
 | bandit, semgrep (registry packs plus repo rules), pip-audit and gitleaks all run | `.github/workflows/ci.yml#bandit`, `.github/workflows/ci.yml#semgrep`, `.github/workflows/ci.yml#audit`, `.github/workflows/ci.yml#secrets` | |
 | The container is non-root, read-only, capability-dropped, digest-pinned, scanned by trivy, and ships an SBOM | `.github/workflows/ci.yml#docker` | Plus a smoke test asserting the HEALTHCHECK reports healthy as UID 10001 |
 | Every benchmark has a regression threshold enforced in CI | `bench/thresholds.json`, `.github/workflows/ci.yml#bench`, `.github/workflows/ci.yml#savings` | Each threshold carries a `_note` saying where it came from |
-| The repository satisfies the shared portfolio baseline | `scripts/check_baseline.py`, `.github/workflows/ci.yml#baseline` | 523 checks including this file's references |
+| The repository satisfies the shared portfolio baseline | `scripts/check_baseline.py`, `.github/workflows/ci.yml#baseline` | 741 checks including this file's references |
 | Tests never reach the network | `tests/conftest.py` | An autouse fixture blocks non-loopback `socket.connect` |
 | The Anthropic SDK is not imported by any offline path | `tests/unit/test_anthropic_provider.py::test_offline_modules_do_not_import_the_sdk` | Checked in a subprocess |
 
