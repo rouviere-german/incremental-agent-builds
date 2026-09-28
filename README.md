@@ -83,7 +83,7 @@ Step by step, in words:
    tokens, no money.
 5. **A step that does re-run may still produce the same answer.** If it does, whatever depended on it
    sees no change and is not re-run either. This is why a whitespace-only commit costs one step
-   execution and zero model calls instead of 83.
+   execution and zero model calls, against the 81–84 calls a from-scratch build makes.
 6. **Model calls are stored as values, not as text caches.** The key for a stored answer covers the
    template text, the model id, `max_tokens`, the system prompt, the output schema and the hash of
    every variable. Two identical keys mean two byte-identical requests, so reusing the answer is
